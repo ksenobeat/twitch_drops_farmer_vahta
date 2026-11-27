@@ -1,0 +1,3119 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вахта</title>
+<style>
+  /* Токены из design/tokens.md.
+     Тему разрешает JS и вешает атрибутом, а не @media: выбор «как в системе /
+     тёмная / светлая» иначе потребовал бы светлый список дважды — раз для
+     медиа-запроса, раз для выбора руками, — и два списка однажды разошлись бы. */
+  :root, :root[data-theme="dark"] {
+    --bg:#100e17; --titlebar:#0c0a12; --sidebar:#0e0c14;
+    --panel:#141120; --panel-head:#151220; --panel-active:#171320; --raised:#1c1826;
+    --line:#282235; --line-soft:#201b2b; --line-inner:#221d2e;
+    --ink:#efe9f7; --ink-2:#c8c2d8; --dim:#8c85a0; --faint:#6b6482; --disabled:#4a4360;
+    --accent:#a970ff; --accent-ink:#e2d4ff; --accent-bg:#2a1f45;
+    --accent-line:#4d3a78; --accent-soft:#2b2140;
+    --ok:#4ade80; --ok-ink:#7ee2a8; --ok-bg:#12251b; --ok-line:#26543a;
+    --warn:#f0b429; --warn-ink:#e8d9b0; --warn-bg:#181409; --warn-line:#3a3020;
+    --danger:#ff6b8b; --danger-ink:#e8a9b8; --danger-bg:#1a1219;
+    --danger-row:#1c1419; --danger-line:#3d2531;
+    --track:#241f33;
+    /* тень ровно у двух вещей: поднятой при перетаскивании строки и
+       всплывающего окна. У карточек теней нет — так в макетах */
+    --lift:0 12px 28px rgba(0,0,0,.55);
+  }
+  :root[data-theme="light"] {
+    --bg:#faf8fc; --titlebar:#f1edf7; --sidebar:#f4f1f9;
+    --panel:#ffffff; --panel-head:#f6f3fb; --panel-active:#faf8fc; --raised:#e9e4f2;
+    --line:#e7e1f0; --line-soft:#f0ebf7; --line-inner:#e2dbee;
+    --ink:#1b1622; --ink-2:#3d3650; --dim:#6b647d; --faint:#7a7389; --disabled:#a49db5;
+    --accent:#7c3aed; --accent-ink:#ffffff; --accent-bg:#f3edff;
+    --accent-line:#d8ccf2; --accent-soft:#f3edff;
+    --ok:#2e9e63; --ok-ink:#1f7a4c; --ok-bg:#eefaf2; --ok-line:#c4e6d2;
+    --warn:#a06d0c; --warn-ink:#5c4a1b; --warn-bg:#fdf9ec; --warn-line:#f0e0b8;
+    --danger:#d1436a; --danger-ink:#a8365a; --danger-bg:#fdf2f5;
+    --danger-row:#fdf2f5; --danger-line:#f2c9d5;
+    --track:#ece5f7;
+    --lift:0 12px 28px rgba(28,24,38,.18);
+  }
+  :root {
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --ui: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing:border-box; }
+  /* Пульт диспетчера, а не страница: окно поделено на полосы, прокручивается
+     не оно целиком, а каждая колонка у себя. */
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:var(--ui); font-size:15px; line-height:1.55;
+         display:flex; flex-direction:column; overflow:hidden; }
+  h1,h2,h3 { margin:0; text-wrap:balance; }
+  button { font:inherit; color:inherit; cursor:pointer; }
+  input { font:inherit; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+
+  /* --- своя титульная строка ------------------------------------------------
+     Видна только в своём окне: класс framed вешается, когда нашёлся мост
+     pywebview. В браузере (запасной путь, когда WebView2 не поднялся) строки
+     нет — там заголовок, кнопки и всё остальное свои, браузерные. */
+  .titlebar { display:none; }
+  .framed .titlebar {
+    display:flex; flex:none; height:34px;
+    background:var(--titlebar); border-bottom:1px solid var(--line);
+    align-items:stretch; user-select:none;
+  }
+  .tb-grab { display:flex; align-items:center; gap:9px; padding-left:12px; flex:1 1 auto; min-width:0; }
+  .tb-grab .mark { width:14px; height:14px; flex:none; }
+  .tb-grab .mark rect { fill:var(--dim); }
+  .tb-grab .mark .mid { fill:var(--accent); }
+  .tb-name { font-family:var(--mono); font-size:10.5px; letter-spacing:.24em;
+             text-transform:uppercase; color:var(--ink-2); white-space:nowrap; }
+  .tb-btns { display:flex; flex:none; }
+  .tb-btn { width:44px; border:0; background:none; display:grid; place-items:center;
+            color:var(--ink-2); transition:background .09s linear, color .09s linear; }
+  .tb-btn:hover { background:var(--raised); color:var(--ink); }
+  .tb-btn:focus-visible { outline-offset:-3px; }
+  .tb-btn.close:hover { background:#e81123; color:#fff; }
+  .tb-btn svg { width:10px; height:10px; fill:none; stroke:currentColor; stroke-width:1.2; }
+
+  /* --- свои полосы прокрутки ------------------------------------------------
+     Только через ::-webkit-scrollbar: стоит задать рядом стандартные
+     scrollbar-width или scrollbar-color — и Chromium перестанет читать эти
+     правила целиком, оставив системную полосу. Движок у нас всегда Chromium,
+     так что выбор в пользу того, что даёт нарисовать полосу целиком.
+
+     scrollbar-gutter обязателен. В Windows полосы по умолчанию прячутся сами
+     и всплывают от движения мыши, а размеченная полоса, в отличие от
+     системной накладной, занимает место в разметке. Без резерва содержимое
+     дёргалось бы на её ширину каждый раз, когда мышь шевельнулась. */
+  .work, .side-nav, .rail { scrollbar-gutter:stable; }
+  ::-webkit-scrollbar { width:11px; height:11px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { border-radius:999px; border:3px solid transparent;
+                              background:var(--line-inner); background-clip:content-box; }
+  ::-webkit-scrollbar-thumb:hover { background-color:var(--dim); }
+  ::-webkit-scrollbar-corner { background:transparent; }
+
+  /* В своём окне текст не выделяется: это интерфейс, а не страница. Выделять
+     дают там, где это осмысленно — поля ввода и то, что копируют руками. */
+  .framed body { user-select:none; cursor:default; }
+  .framed input, .framed textarea, .framed .code, .framed .sel { user-select:text; cursor:auto; }
+
+  .label { font-family:var(--mono); font-size:10.5px; font-weight:600;
+           letter-spacing:.14em; text-transform:uppercase; color:var(--dim); }
+  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  /* --- оболочка ------------------------------------------------------------
+     Сайдбар 196 · работа · правая колонка 316 · статусная строка 28 снизу.
+     Правая колонка пока пуста: её наполняют экраны, а они переписываются
+     в 1.2.3 — до тех пор `:empty` её просто не показывает. */
+  .shell { flex:1 1 auto; display:flex; min-height:0; }
+  /* Фон у прокручиваемых колонок обязателен, хотя он и совпадает с фоном
+     страницы. Chromium уводит такую колонку на свой слой композитора, а на
+     прозрачном слое субпиксельное сглаживание текста невозможно — движок
+     молча переходит на серое, начертание меняется, и буквы будто дёргаются
+     при первых же движениях мыши. Свой непрозрачный фон это снимает. */
+  .work { flex:1 1 auto; min-width:0; overflow-y:auto; background:var(--bg); }
+  .rail { width:316px; flex:none; overflow-y:auto; background:var(--sidebar);
+          border-left:1px solid var(--line); }
+  .rail:empty { display:none; }
+  .app { padding:22px 24px 40px; }
+
+  .head { display:flex; align-items:flex-end; gap:14px; margin-bottom:20px; }
+  .head h1 { font-family:var(--mono); font-size:16px; font-weight:500;
+             letter-spacing:.14em; text-transform:uppercase; }
+  .head .spacer { flex:1 1 auto; }
+  .stamp { font-family:var(--mono); font-size:10px; letter-spacing:.22em;
+           text-transform:uppercase; color:var(--faint); margin-bottom:5px; }
+  /* подпись рядом с заголовком: не всякому экрану есть что сказать о себе,
+     пустая — не занимает места */
+  .head .aside { font-size:13.5px; color:var(--dim); margin-bottom:3px; }
+  .head .aside:empty { display:none; }
+
+  /* --- экран «Сейчас» ------------------------------------------------------ */
+  .shift-card { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+                padding:16px 18px; display:flex; gap:16px; align-items:center; }
+  .shift-card.paused { background:var(--panel); }
+  .shift-body { flex:1 1 auto; min-width:0; }
+  .shift-top { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+  .shift-top h3 { font-size:19px; font-weight:600; }
+  .shift-top .sub { font-size:12.5px; color:var(--dim); }
+  .shift-top .spacer { flex:1 1 auto; }
+  .track { height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .track i { display:block; height:100%; border-radius:3px; background:var(--accent);
+             transition:width 1s linear; }
+  .track.dim i { background:var(--disabled); }
+  .under { display:flex; justify-content:space-between; gap:12px; margin-top:9px;
+           font-family:var(--mono); font-size:10.5px; letter-spacing:.12em;
+           text-transform:uppercase; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .said { font-size:13px; color:var(--dim); margin-top:10px; }
+
+  .board { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .board-h { display:flex; align-items:baseline; gap:12px; padding:0 0 10px; }
+  .board-h .label { font-size:10px; letter-spacing:.22em; }
+  .board-h .aside { font-size:12.5px; color:var(--dim); font-family:var(--ui);
+                    text-transform:none; letter-spacing:0; }
+  .day { display:flex; gap:12px; align-items:center; padding:8px 16px;
+         background:var(--panel-head); border-bottom:1px solid var(--line-soft);
+         font-family:var(--mono); font-size:9.5px; letter-spacing:.22em;
+         text-transform:uppercase; color:var(--faint); }
+  .slot { display:flex; align-items:center; gap:14px; padding:12px 16px;
+          border-bottom:1px solid var(--line-soft); background:var(--panel);
+          transition:background .09s linear; }
+  .slot:last-child { border-bottom:0; }
+  .slot:hover { background:var(--panel-active); }
+  .slot.on { background:var(--panel-active); }
+  .slot.bad { background:var(--danger-row); }
+  .slot .when { width:118px; flex:none; font-family:var(--mono); font-size:11.5px;
+                font-variant-numeric:tabular-nums; color:var(--ink-2); }
+  .slot .when small { display:block; font-size:9.5px; letter-spacing:.18em;
+                      text-transform:uppercase; color:var(--faint); margin-top:2px; }
+  .slot .mark { width:8px; height:8px; border-radius:50%; flex:none;
+                background:var(--disabled); }
+  .slot.on .mark { background:var(--accent); }
+  .slot.bad .mark { background:var(--danger); }
+  .slot .grow { flex:1 1 auto; min-width:0; }
+  .slot .t { font-size:13.5px; font-weight:400; }
+  .slot.on .t { font-weight:600; }
+  .slot .s { font-size:12px; color:var(--dim); }
+  .state { flex:none; font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+           text-transform:uppercase; color:var(--faint); }
+  .state.on { color:var(--accent); }
+  .state.warn { color:var(--warn); }
+  .state.bad { color:var(--danger); }
+
+  .warn-box { border:1px solid var(--warn-line); background:var(--warn-bg);
+              border-radius:10px; padding:14px 16px; }
+  .warn-box .label { color:var(--warn); }
+  .warn-box p { margin:8px 0 0; font-size:13.5px; line-height:1.55; color:var(--warn-ink); }
+
+  .void { max-width:520px; margin:9vh auto 0; }
+  .void .mark { width:34px; height:34px; color:var(--disabled); display:block; margin-bottom:22px; }
+  .void h2 { font-family:var(--mono); font-size:17px; font-weight:500; letter-spacing:.14em;
+             text-transform:uppercase; margin-bottom:14px; }
+  .void p { margin:0 0 20px; font-size:13.5px; line-height:1.6; color:var(--dim); }
+  .void .hint { font-family:var(--mono); font-size:10px; letter-spacing:.18em;
+                text-transform:uppercase; color:var(--faint); margin-top:14px; }
+
+  /* --- экран «Расписание» -------------------------------------------------- */
+  .summary { display:grid; grid-template-columns:repeat(3,1fr); gap:1px;
+             background:var(--line-inner); border:1px solid var(--line);
+             border-radius:10px; overflow:hidden; margin-bottom:22px; }
+  .cell { background:var(--panel); padding:15px 18px 16px; }
+  .cell b { display:block; font-family:var(--mono); font-size:26px; font-weight:400;
+            line-height:1.1; margin:8px 0 6px; font-variant-numeric:tabular-nums; }
+  .cell small { font-size:12.5px; color:var(--dim); }
+  .cell.bad b { color:var(--danger); } .cell.warn b { color:var(--warn); }
+
+  .grid { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .gh, .gr { display:grid; align-items:center;
+             grid-template-columns:150px 1fr 190px 118px 88px; }
+  .gh { padding:9px 16px; background:var(--panel-head); border-bottom:1px solid var(--line);
+        font-family:var(--mono); font-size:9.5px; letter-spacing:.22em;
+        text-transform:uppercase; color:var(--faint); }
+  .gr { padding:12px 16px; background:var(--panel); border-bottom:1px solid var(--line-soft);
+        transition:background .09s linear; }
+  .gr:last-child { border-bottom:0; }
+  .gr:hover { background:var(--panel-active); }
+  .gr.on { background:var(--panel-active); }
+  .gr.bad { background:var(--danger-row); }
+  .gr .win { font-family:var(--mono); font-size:11.5px; color:var(--ink-2);
+             font-variant-numeric:tabular-nums; }
+  .gr.bad .win { color:var(--danger); text-transform:uppercase; letter-spacing:.12em;
+                 font-size:10px; }
+  .gr .camp { display:flex; align-items:center; gap:11px; min-width:0; padding-right:16px; }
+  .gr .camp .t { font-size:14px; }
+  .gr.on .camp .t { font-weight:600; }
+  .gr .camp .s { font-size:12.5px; color:var(--dim); overflow:hidden;
+                 text-overflow:ellipsis; white-space:nowrap; }
+  .gr .camp .s.warn { color:var(--warn); }
+  .slack { display:flex; align-items:center; gap:11px; padding-right:16px; }
+  .slack .bar2 { flex:1 1 auto; height:4px; border-radius:2px; background:var(--track); }
+  .slack .bar2 i { display:block; height:100%; border-radius:2px; background:var(--ok); }
+  .slack.tight .bar2 i { background:var(--warn); }
+  .slack.over .bar2 i { background:var(--danger); }
+  .slack em { flex:none; font-style:normal; font-family:var(--mono); font-size:11px;
+              color:var(--ok-ink); font-variant-numeric:tabular-nums; }
+  .slack.tight em { color:var(--warn); } .slack.over em { color:var(--danger); }
+  .slack.none em { color:var(--disabled); }
+  .gr .dl { font-family:var(--mono); font-size:11.5px; color:var(--ink-2);
+            font-variant-numeric:tabular-nums; }
+  .note-under { font-size:13px; line-height:1.6; color:var(--dim); margin-top:18px; }
+
+  /* --- экран «Мои игры» ----------------------------------------------------
+     Всё движение отсюда расписано в design/notes.md по шагам. Ничего не
+     двигается дольше 180 мс, масштаб не меняется, строка не «поднимается»
+     при простом наведении. */
+  .wl { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .wh, .wr { display:grid; align-items:center;
+             grid-template-columns:30px 46px 1fr 210px 106px 74px; }
+  .wh { padding:9px 16px; background:var(--panel-head); border-bottom:1px solid var(--line);
+        font-family:var(--mono); font-size:9.5px; letter-spacing:.22em;
+        text-transform:uppercase; color:var(--faint); }
+  .wr { padding:12px 16px; background:var(--panel); border-bottom:1px solid var(--line-soft);
+        border-radius:8px; transition:background .09s linear; }
+  .wr:last-child { border-bottom:0; }
+  .wr:hover { background:var(--panel-active); }
+  .wl.dragging .wr { opacity:.72; }
+  .wr.lifted { opacity:1; position:relative; z-index:2; background:var(--accent-soft);
+               box-shadow:var(--lift); border:1px solid var(--accent-line); }
+
+  .grip { width:14px; height:16px; border:0; background:none; padding:0; cursor:grab;
+          color:var(--disabled); display:grid; place-items:center; }
+  .wr:hover .grip { color:var(--dim); }
+  .grip:hover { color:var(--accent); }
+  .wr.lifted .grip { cursor:grabbing; color:var(--accent); }
+  .grip svg { width:8px; height:12px; fill:currentColor; }
+
+  .wr .num { font-family:var(--mono); font-size:12px; color:var(--faint);
+             font-variant-numeric:tabular-nums; }
+  .wr.lifted .num { color:var(--accent); }
+  /* Номер — поле ввода, а выглядит как номер: перетаскивание удобно, когда
+     двигаешь соседей, а «поставь эту седьмой» мышью означает целиться. */
+  input.num { width:34px; padding:3px 0; border:1px solid transparent; border-radius:6px;
+              background:none; text-align:left; -moz-appearance:textfield; }
+  input.num::-webkit-inner-spin-button { display:none; }
+  .wr:hover input.num { border-color:var(--line); color:var(--dim); }
+  input.num:focus { outline:none; border-color:var(--accent); color:var(--fg);
+                    background:var(--panel-active); text-align:center; }
+  .wr .who2 { display:flex; align-items:center; gap:11px; min-width:0; padding-right:16px; }
+  .wr .who2 .t { font-size:14px; }
+  .wr .who2 .s { font-size:12px; color:var(--warn); }
+  .wr .who2 .s.dim { color:var(--dim); }
+  .air { display:flex; align-items:center; gap:11px; padding-right:16px; }
+  .air .bar2 { flex:1 1 auto; height:4px; border-radius:2px; background:var(--track); }
+  .air .bar2 i { display:block; height:100%; border-radius:2px; background:var(--ok); }
+  .air.thin .bar2 i { background:var(--warn); }
+  .air.none .bar2 i { width:0; }
+  .air em { flex:none; font-style:normal; font-family:var(--mono); font-size:10.5px;
+            letter-spacing:.1em; text-transform:uppercase; color:var(--ink-2);
+            font-variant-numeric:tabular-nums; }
+  .air.none em { color:var(--faint); }
+  .drop-line { display:flex; align-items:center; gap:10px; height:2px; margin:0 16px;
+               position:relative; }
+  .drop-line i { flex:1 1 auto; height:2px; background:var(--accent); border-radius:1px; }
+  .drop-line i:first-child { flex:none; width:6px; height:6px; border-radius:50%; }
+  .drop-line b { flex:none; font-family:var(--mono); font-size:9.5px; font-weight:400;
+                 letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+  .wl-tail { padding:13px 16px; background:var(--panel-head); font-family:var(--mono);
+             font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+             color:var(--faint); cursor:pointer; border:0; width:100%; text-align:left; }
+  .wl-tail:hover { color:var(--ink-2); }
+  .price { display:flex; justify-content:space-between; gap:14px; padding:7px 0;
+           border-bottom:1px solid var(--line-soft); font-size:13.5px; }
+  .price:last-of-type { border-bottom:0; }
+  .price em { font-style:normal; font-family:var(--mono); font-size:12px;
+              font-variant-numeric:tabular-nums; color:var(--dim); }
+  .price em.up { color:var(--ok-ink); } .price em.down { color:var(--danger); }
+
+  /* --- Гант: главный вид «Расписания» ---------------------------------------
+     Пропорции в процентах, а не в пикселях: окно тянут, а сетка суток должна
+     оставаться на своих местах. Полосы пересекаются намеренно — эфир делится,
+     и толщина полосы это и показывает. */
+  .gantt { margin:0 0 20px; padding:14px 0 0; background:var(--panel);
+           border:1px solid var(--line-soft); border-radius:12px; overflow:hidden; }
+  .gan-r { display:grid; grid-template-columns:minmax(120px,210px) 1fr; align-items:center;
+           gap:14px; padding:0 16px; height:30px; }
+  .gan-r:hover { background:var(--panel-active); }
+  .gan-h { height:24px; margin-bottom:6px; }
+  .gan-h:hover { background:none; }
+  .gan-h .gan-n { font-family:var(--mono); font-size:9.5px;
+                  letter-spacing:.22em; text-transform:uppercase; color:var(--faint); }
+  .gan-n { display:flex; align-items:center; gap:9px; min-width:0; }
+  .gan-n .t { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gan-t { position:relative; height:100%; }
+  .gan-h .gan-t { border-bottom:1px solid var(--line-soft); }
+  .bar { position:absolute; top:50%; transform:translateY(-50%); border-radius:3px;
+         background:var(--accent); opacity:.82; min-width:2px; }
+  .bar:hover { opacity:1; }
+  .bar.on { background:var(--ok); }
+  .bar.warn { background:var(--warn); }
+  .bar.bad { background:var(--danger); }
+  /* дедлайн — штрих поперёк строки: он про «когда сгорит», а не про длительность */
+  .dl-mark { position:absolute; top:3px; bottom:3px; width:0; border-left:2px dotted var(--danger); }
+  .tick { position:absolute; top:0; bottom:0; width:1px; background:var(--line-soft); }
+  .tick-t { position:absolute; bottom:2px; transform:translateX(-50%); font-style:normal;
+            font-family:var(--mono); font-size:9.5px; color:var(--faint);
+            font-variant-numeric:tabular-nums; }
+  .tick-t.now { left:0; transform:none; letter-spacing:.14em; color:var(--accent); }
+  .gan-none { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+              text-transform:uppercase; color:var(--danger); }
+  .gan-legend { padding:12px 16px 13px; margin-top:8px; line-height:1.65;
+                font-size:12.5px; color:var(--dim);
+                border-top:1px solid var(--line-soft); background:var(--panel-head); }
+
+  /* --- экран «Каталог» ------------------------------------------------------
+     Таблица та же, что у «Расписания» (.grid/.gh/.gr) — другие колонки.
+     Поиск и фильтры живут в шапке экрана, как в макете: строка одна. */
+  /* колонки сжимаются: при 900 px (минимальная ширина окна) фиксированные
+     съедали название игры до полутора букв */
+  .grid.cat .gh, .grid.cat .gr {
+    grid-template-columns:minmax(190px,1fr) minmax(84px,190px) 88px minmax(118px,176px) 96px; }
+  .grid.cat .camp .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grid.cat .pub { font-size:13.5px; color:var(--ink-2); padding-right:16px;
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grid.cat .dl.soon { color:var(--danger); }
+  /* последняя колонка прижата вправо: там действие, а не значение */
+  .grid.cat .gh > :last-child, .grid.cat .gr > :last-child { justify-self:end; }
+  .ln { font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+        text-transform:uppercase; color:inherit; text-decoration:none; }
+  .ln:hover { text-decoration:underline; }
+  .state.ok { color:var(--ok); }
+  button.state { border:0; background:none; padding:0; }
+  button.state:hover { color:var(--accent); }
+
+  /* строка одна: при нехватке места ужимается поиск, а не фильтры —
+     переносить чипы значило бы двигать всю таблицу вниз */
+  .head .chips.wide { flex:1 1 auto; margin-left:6px; align-items:stretch; flex-wrap:nowrap; }
+  .head .chips.wide .btn { flex:none; }
+  .search { display:flex; align-items:center; gap:10px; flex:1 1 auto; min-width:120px;
+            background:var(--panel); border:1px solid var(--line); border-radius:8px;
+            padding:0 13px; height:34px; }
+  .search:focus-within { border-color:var(--accent-line); }
+  .search input { flex:1 1 auto; min-width:0; background:none; border:0; padding:0;
+                  color:inherit; font-size:13.5px; }
+  .search input:focus { outline:none; }
+  .search input::placeholder { color:var(--faint); }
+  .search .clear { border:0; background:none; padding:0; white-space:nowrap;
+                   font-family:var(--mono); font-size:10px; letter-spacing:.14em;
+                   text-transform:uppercase; color:var(--faint); }
+  .search .clear:hover { color:var(--ink-2); }
+  .search .clear[hidden] { display:none; }
+
+  .nothing { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+             padding:56px 44px; }
+  .nothing .void { margin:0 auto; }
+  .void .acts { display:flex; gap:10px; margin-bottom:16px; }
+  .foot-note { font-family:var(--mono); font-size:10px; letter-spacing:.2em;
+               text-transform:uppercase; color:var(--faint); margin-top:16px; }
+
+  /* --- экран «Инвентарь» ----------------------------------------------------
+     Те же .grid и .summary, что у «Расписания»: колонки другие, всё остальное
+     общее. Полоса «доля эфира» — от самой отфармленной игры, а не от суммы:
+     сравнивают глазами именно с первой строкой.
+
+     Две таблицы, потому что и источника два: игры с часами — наши, награды —
+     из инвентаря Twitch. Награды плоским списком, без группировки по играм:
+     Twitch не говорит, к какой игре относится награда (`game` у всех пустой). */
+  .summary.four { grid-template-columns:repeat(4,1fr); }
+  .summary.four .cell b { margin-top:0; }
+  .grid.inv .gh, .grid.inv .gr {
+    grid-template-columns:minmax(160px,1fr) minmax(140px,430px) 88px 72px; }
+  .grid.rew .gh, .grid.rew .gr {
+    grid-template-columns:minmax(180px,1fr) minmax(120px,240px) 108px 56px; }
+  .grid.inv .camp .t, .grid.rew .camp .t {
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grid.rew .pub { font-size:13.5px; color:var(--ink-2); padding-right:16px;
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .grid.rew .pub.none { color:var(--faint); }
+  /* Игра у награды вписывается руками — поле выглядит текстом, пока в него
+     не целятся: Twitch игру не отдаёт, и у большинства наград тут прочерк,
+     который не должен выглядеть как сто пустых форм */
+  input.pub { width:100%; min-width:0; margin:-3px 0; padding:3px 7px;
+              border:1px solid transparent; border-radius:6px; background:none;
+              font-family:inherit; }
+  .grid.rew .gr:hover input.pub { border-color:var(--line); }
+  input.pub:focus { outline:none; border-color:var(--accent); color:var(--fg);
+                    background:var(--panel); }
+  /* вписанное руками — пунктиром: видно, что это не подстановка */
+  input.pub.hand { text-decoration:underline dotted var(--line); text-underline-offset:3px; }
+  /* «новое» — награда, которой не было при прошлом открытии экрана. Метка
+     у названия, а не отдельная колонка: колонка стояла бы пустой месяцами */
+  .grid.rew .gr.fresh { background:var(--accent-soft); }
+  .grid.rew .mark { flex:none; font-family:var(--mono); font-size:9.5px;
+                    letter-spacing:.14em; text-transform:uppercase;
+                    color:var(--accent); }
+  .foot-note.warn { color:var(--warn); }
+  /* картинка награды — не бокс-арт: она квадратная и лежит на прозрачном фоне,
+     поэтому и размер квадратный, и `cover` ей не нужен — режет предмет */
+  .grid.rew .art { width:28px; height:28px; border-radius:6px; background:var(--track); }
+  .grid.rew .art img { object-fit:contain; }
+  .sect { display:flex; align-items:baseline; gap:12px; margin:26px 0 12px; }
+  /* flex — ради знака «2 новые» рядом с подписью: без него он прилипал
+     к последней букве, как «twitch2 новые» */
+  .sect .label { display:flex; align-items:center; gap:10px; margin:0; flex:none; }
+  .sect .s { font-size:13px; color:var(--dim); }
+  .share { padding-right:26px; }
+  .share .bar2 { height:4px; border-radius:2px; background:var(--track); }
+  .share .bar2 i { display:block; height:100%; border-radius:2px; background:var(--accent); }
+
+  /* --- экран «Настройки» ----------------------------------------------------
+     Два столбца, как в макете: слева то, что связывает с чужими сервисами,
+     справа — что настраивается внутри. Риск и данные — во всю ширину. */
+  /* Два столбца — flex, а не grid: у сетки панели выравниваются по строкам,
+     и под низкой панелью остаётся дыра во всю высоту соседней. */
+  .set { display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+  .set .col { flex:1 1 360px; min-width:0; display:flex; flex-direction:column; gap:18px; }
+  .pnl { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+         padding:19px 21px 21px; }
+  .pnl > .label { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+  .pnl h3 { font-size:16px; font-weight:600; }
+  .pnl p { margin:14px 0 0; font-size:13.5px; line-height:1.55; color:var(--dim); }
+  .pnl .line { display:flex; align-items:center; gap:14px; }
+  .pnl .line + .line { margin-top:15px; }
+  .pnl .line .grow { flex:1 1 auto; min-width:0; }
+  .pnl .sub { font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+              text-transform:uppercase; color:var(--faint); margin-top:4px; }
+  .pnl .acts { display:flex; gap:10px; margin-top:16px; }
+  .pnl.warn { border-color:var(--warn-line); background:var(--warn-bg); }
+  .pnl.warn > .label { color:var(--warn); }
+  .pnl.warn p { color:var(--warn-ink); }
+  .avatar { width:30px; height:30px; border-radius:7px; flex:none; display:grid;
+            place-items:center; background:var(--accent-soft); color:var(--accent);
+            font-family:var(--mono); font-size:11px; }
+  .field { display:flex; gap:10px; margin-top:16px; }
+  .field input { flex:1 1 auto; min-width:0; background:var(--bg); border:1px solid var(--line);
+                 border-radius:8px; padding:9px 13px; color:inherit; font-size:13.5px; }
+  .field input:focus { outline:none; border-color:var(--accent-line); }
+  .field input::placeholder { color:var(--faint); }
+
+  /* переключатель: в макете это тумблер, а не галочка */
+  .sw { display:flex; align-items:center; gap:13px; cursor:pointer; }
+  .sw input { position:absolute; opacity:0; width:0; height:0; }
+  .sw i { width:38px; height:21px; border-radius:999px; flex:none; background:var(--track);
+          border:1px solid var(--line-inner); position:relative;
+          transition:background .12s linear, border-color .12s linear; }
+  .sw i::after { content:""; position:absolute; top:2px; left:2px; width:15px; height:15px;
+                 border-radius:50%; background:var(--disabled);
+                 transition:transform .12s cubic-bezier(.2,0,.2,1), background .12s linear; }
+  .sw input:checked + i { background:var(--accent-bg); border-color:var(--accent-line); }
+  .sw input:checked + i::after { transform:translateX(17px); background:var(--accent); }
+  .sw input:focus-visible + i { outline:2px solid var(--accent); outline-offset:2px; }
+  .sw .s { font-size:12.5px; color:var(--dim); margin-top:2px; }
+
+  .codebox { border:1px solid var(--line); border-radius:10px; background:var(--bg);
+             padding:15px 17px; margin-top:16px; }
+  .codebox b { display:block; font-family:var(--mono); font-size:25px; font-weight:400;
+               letter-spacing:.22em; user-select:all; }
+  .codebox .s { margin-top:9px; font-size:12.5px; color:var(--dim); }
+  .codebox.dead { border-color:var(--danger-line); background:var(--danger-bg); }
+  .codebox.dead b { color:var(--disabled); text-decoration:line-through; }
+  .codebox.dead .s { color:var(--danger); }
+  .steps { margin:14px 0 0; padding:0; list-style:none; counter-reset:step; }
+  .steps li { font-size:13.5px; color:var(--ink-2); padding:3px 0; }
+  .steps li::before { counter-increment:step; content:counter(step) " · ";
+                      font-family:var(--mono); font-size:12px; color:var(--faint); }
+
+  /* --- мастер первого запуска и тосты ---------------------------------------
+     Мастер — накладка внутри своего же окна, а не второе окно: вторая
+     поверхность тянет за собой позицию, фокус, тему и своё закрытие.
+     Своя титульная строка остаётся сверху — окно должно оставаться окном. */
+  .wiz { position:fixed; inset:0; z-index:20; background:var(--bg);
+         display:flex; flex-direction:column; }
+  .framed .wiz { top:34px; }
+  .wiz-top { flex:none; display:flex; align-items:center; gap:11px; height:46px;
+             padding:0 16px; background:var(--titlebar); border-bottom:1px solid var(--line); }
+  .wiz-top .mark { width:13px; height:13px; flex:none; }
+  .wiz-top .mark rect { fill:var(--dim); }
+  .wiz-top .mark .mid { fill:var(--accent); }
+
+  /* Ожидание ответа Twitch. Индикатор — тот же знак, что в трее, и работает он
+     так же: средняя полоса это шкала. Там она показывает прогресс смены, здесь
+     ходит туда-обратно, потому что сколько ждать — неизвестно. Своего спиннера
+     в «Вахте» нет и не надо: знак уже есть и уже значит «идёт работа» */
+  .wait { display:flex; align-items:center; gap:14px; padding:18px 0; color:var(--dim);
+          font-size:13.5px; }
+  .wait .mark { width:26px; height:26px; flex:none; }
+  .wait .mark rect { fill:var(--disabled); }
+  .wait .mark .mid { fill:var(--accent); transform-box:fill-box;
+                     transform-origin:left center; animation:bar 1.15s ease-in-out infinite; }
+  @keyframes bar { 0%,100% { transform:scaleX(.28) } 50% { transform:scaleX(1) } }
+  @media (prefers-reduced-motion:reduce) {
+    .wait .mark .mid { animation:none; transform:scaleX(.6) } }
+  .wiz-top .spacer { flex:1 1 auto; }
+  .wiz-top .skip { border:0; background:none; padding:6px 8px; font-family:var(--mono);
+                   font-size:10px; letter-spacing:.16em; text-transform:uppercase;
+                   color:var(--faint); }
+  .wiz-top .skip:hover { color:var(--ink-2); }
+  .wiz-body { flex:1 1 auto; overflow-y:auto; padding:26px 32px 16px; background:var(--bg); }
+  .wiz-in { max-width:860px; margin:0 auto; }
+  .wiz-steps { display:flex; gap:9px; margin-bottom:15px; }
+  .wiz-steps i { flex:1 1 0; height:3px; border-radius:2px; background:var(--track); }
+  .wiz-steps i.done { background:var(--accent); }
+  .wiz-steps i.now { background:color-mix(in srgb,var(--accent) 55%,transparent); }
+  .wiz h2 { font-size:25px; font-weight:650; margin:9px 0 13px; }
+  .wiz-in > p { margin:0 0 9px; font-size:14px; line-height:1.6; color:var(--dim);
+                max-width:74ch; }
+  .wiz-foot { flex:none; display:flex; align-items:center; gap:11px; padding:13px 32px;
+              background:var(--panel); border-top:1px solid var(--line); }
+  .wiz-foot .hint { flex:1 1 auto; font-size:13px; color:var(--faint); }
+  .wiz .grid { margin-top:20px; }
+  .wiz .field, .wiz .set { margin-top:20px; }
+
+  /* Тост живёт внутри окна, значит виден, только пока окно открыто. Родное
+     уведомление Windows нужно ровно для обратного случая — они не замена
+     друг другу. Правый нижний угол, над статусной строкой. */
+  .toasts { position:fixed; right:15px; bottom:37px; z-index:30; display:flex;
+            flex-direction:column; align-items:flex-end; gap:8px; pointer-events:none; }
+  .toast { min-width:230px; max-width:330px; border:1px solid var(--line-inner);
+           border-radius:10px; background:var(--raised); padding:12px 14px;
+           box-shadow:var(--lift); animation:toast-in .14s cubic-bezier(.2,0,.2,1); }
+  .toast .label { color:var(--accent); }
+  .toast p { margin:7px 0 0; font-size:13px; line-height:1.5; color:var(--ink-2); }
+  .toast.out { opacity:0; transition:opacity .2s linear; }
+  @keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; } }
+  @media (prefers-reduced-motion:reduce) { .toast { animation:none; } }
+
+  /* правая колонка экрана «Сейчас» */
+  .rail-in { padding:16px 16px 28px; display:flex; flex-direction:column; gap:16px; }
+  .tiles { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line-inner);
+           border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .tile { background:var(--panel); padding:14px 16px; }
+  .tile b { display:block; font-family:var(--mono); font-size:22px; font-weight:400;
+            line-height:1.1; font-variant-numeric:tabular-nums; margin-bottom:5px; }
+  .tile small { font-size:11.5px; color:var(--dim); }
+  .tile.bad b { color:var(--danger); }
+  .tile.warn b { color:var(--warn); }
+  .box { border-radius:10px; padding:14px 16px; border:1px solid var(--line); }
+  .box.bad { border-color:var(--danger-line); background:var(--danger-bg); }
+  .box.bad .label { color:var(--danger); }
+  .box.warn { border-color:var(--warn-line); background:var(--warn-bg); }
+  .box.warn .label { color:var(--warn); }
+  .box p { margin:9px 0 0; font-size:13px; line-height:1.55; }
+  .box.bad p { color:var(--ink); } .box.warn p { color:var(--warn-ink); }
+  /* В правой колонке 316 px, а в подписи кнопки — название кампании: в строку
+     они не помещаются и вылезали за панель. Столбиком и по левому краю. */
+  .box .acts { display:flex; flex-direction:column; align-items:stretch;
+               gap:8px; margin-top:13px; }
+  .box .acts .btn { text-align:left; white-space:normal; }
+  /* Вилка «что важнее»: те же кнопки столбиком, но отделённые от объяснения —
+     сведение выше, выбор ниже. «Оставить как есть» набрано текстом, а не
+     кнопкой: это то, что случится само. */
+  .ask { margin-top:13px; border-top:1px solid var(--line); padding-top:12px; }
+  .ask .label { font-size:10px; letter-spacing:.22em; margin-bottom:9px; }
+  .ask .btn { display:block; width:100%; text-align:left; white-space:normal;
+              margin-bottom:8px; }
+  .ask p.sub { margin:2px 0 0; font-size:12px; line-height:1.5; }
+  .taken { display:flex; align-items:center; gap:10px; padding:9px 0;
+           border-bottom:1px solid var(--line-soft); font-size:13px; }
+  .taken:last-child { border-bottom:0; }
+  .taken .grow { flex:1 1 auto; min-width:0; overflow:hidden;
+                 text-overflow:ellipsis; white-space:nowrap; }
+  .taken .at { flex:none; font-family:var(--mono); font-size:10.5px; color:var(--faint);
+               font-variant-numeric:tabular-nums; }
+
+  .side { width:196px; flex:none; display:flex; flex-direction:column;
+          background:var(--sidebar); border-right:1px solid var(--line); }
+  .side-nav { flex:1 1 auto; overflow-y:auto; padding:10px 0; background:var(--sidebar); }
+  .nav-item { display:flex; align-items:center; gap:10px; width:100%; background:none;
+              border:0; padding:11px 18px; text-align:left; font-family:var(--mono);
+              font-size:11px; letter-spacing:.16em; text-transform:uppercase;
+              color:var(--dim); box-shadow:inset 2px 0 0 transparent; }
+  .nav-item:hover { color:var(--ink-2); background:var(--panel-active); }
+  .nav-item[aria-selected="true"] { color:var(--ink); background:var(--raised);
+                                    box-shadow:inset 2px 0 0 var(--accent); }
+  .nav-item .grow { flex:1 1 auto; }
+  .tally { font-style:normal; font-size:10.5px; letter-spacing:.06em; color:var(--faint); }
+  .tally.crit { color:var(--danger); }
+  /* новое в инвентаре — не беда и не просто счётчик: цифра, на которую стоит
+     нажать. Поэтому акцент, а не серый и не красный */
+  .tally.new { color:var(--accent); }
+  .tally[hidden], .live-dot[hidden] { display:none; }
+  .live-dot { width:6px; height:6px; border-radius:50%; background:var(--ok); flex:none; }
+
+  .side-foot { flex:none; padding:16px 18px 14px; border-top:1px solid var(--line); }
+  .side-foot .shift { font-family:var(--mono); font-size:24px; line-height:1.1;
+                      font-variant-numeric:tabular-nums; margin:7px 0 2px; }
+  .side-foot .since { font-size:12px; color:var(--dim); }
+  .who { display:flex; align-items:center; gap:9px; margin-top:14px;
+         padding-top:12px; border-top:1px solid var(--line-soft); }
+  .who i { width:26px; height:26px; border-radius:6px; flex:none; display:grid;
+           place-items:center; background:var(--accent-soft); color:var(--accent);
+           font-family:var(--mono); font-size:10px; font-style:normal; }
+  .who span { font-size:13px; color:var(--ink-2); overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; }
+
+  .statusbar { flex:none; display:flex; align-items:center; gap:18px; height:28px;
+               padding:0 14px; background:var(--titlebar); border-top:1px solid var(--line);
+               font-family:var(--mono); font-size:9.5px; letter-spacing:.2em;
+               text-transform:uppercase; color:var(--faint); user-select:none; }
+  .statusbar .spacer { flex:1 1 auto; }
+  .statusbar b { font-weight:400; color:var(--dim); }
+  .statusbar .beat { width:5px; height:5px; border-radius:50%; background:var(--disabled);
+                     display:inline-block; margin-right:7px; vertical-align:1px; }
+  .statusbar.live .beat { background:var(--ok); }
+  .statusbar .upd { color:var(--accent); text-decoration:none; }
+  .statusbar .upd b { color:var(--accent); }
+  .statusbar .upd:hover { text-decoration:underline; }
+  .statusbar .upd[hidden] { display:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono);
+          font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+          padding:5px 11px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+  .pill.live { background:var(--ok-bg); color:var(--ok);
+               border-color:color-mix(in srgb,var(--ok) 30%,transparent); }
+  .pill.mute { background:var(--raised); color:var(--dim); border-color:var(--line); }
+  .dot { width:6px; height:6px; border-radius:50%; background:currentColor; flex:none; }
+  /* единственная бесконечная анимация в интерфейсе — точка «в эфире» */
+  .pill.live .dot, .statusbar.live .beat, .live-dot {
+    animation:pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+  @media (prefers-reduced-motion:reduce) {
+    .pill.live .dot, .statusbar.live .beat, .live-dot { animation:none } }
+
+  .pane { display:none; } .pane.on { display:block; }
+
+  /* Общие мелочи, которыми пользуются все экраны. Всё, что осталось от старой
+     вёрстки, ушло вместе с последним переписанным экраном — вместе со списком
+     псевдонимов токенов в :root. */
+  .stack { display:flex; flex-direction:column; gap:18px; }
+
+  .art { flex:none; position:relative; overflow:hidden; border-radius:4px; background:var(--raised);
+         display:grid; place-items:center; font-family:var(--mono); font-weight:700; color:var(--dim);
+         box-shadow:inset 0 0 0 1px var(--line); }
+  .art img { width:100%; height:100%; object-fit:cover; display:block; }
+  .art.xs { width:24px; height:32px; font-size:8.5px; }
+  .art.sm { width:34px; height:45px; font-size:11px; }
+  .art.md { width:42px; height:56px; font-size:12px; }
+  .art.lg { width:84px; height:112px; font-size:21px; border-radius:6px; }
+
+  .btn { border:1px solid var(--line-inner); background:var(--panel); border-radius:7px;
+         padding:8px 15px; font-size:13px; font-weight:550; white-space:nowrap; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  .btn.sm { padding:5px 11px; font-size:12px; }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.primary:hover { background:color-mix(in srgb,var(--accent) 84%,#000); color:#fff; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chips .btn.on { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+
+  .addrow { display:flex; gap:8px; }
+  .addrow input { flex:1 1 auto; min-width:0; background:var(--raised); border:1px solid var(--line);
+                  border-radius:7px; padding:8px 12px; color:inherit; }
+  .note { font-size:12.5px; color:var(--dim); }
+  .lnk { color:var(--accent); text-decoration:none; }
+  .lnk:hover { text-decoration:underline; }
+
+  .btn[disabled], input[disabled] { opacity:.45; cursor:not-allowed; }
+  .btn[disabled]:hover { border-color:var(--line-inner); color:inherit; }
+
+  /* Browser layout: desktop WebView keeps its original fixed-column shell. */
+  @media (max-width:1100px) {
+    .server body { height:auto; min-height:100dvh; overflow:auto; }
+    .server .shell { display:grid; grid-template-columns:160px minmax(0,1fr); min-height:calc(100dvh - 28px); }
+    .server .side { width:160px; grid-row:1 / 3; position:sticky; top:0; height:calc(100dvh - 28px); }
+    .server .work { overflow:visible; scrollbar-gutter:auto; }
+    .server .rail { grid-column:2; width:auto; overflow:visible; border-left:0; border-top:1px solid var(--line); }
+    .server .statusbar { position:sticky; bottom:0; z-index:5; overflow-x:auto; white-space:nowrap; min-height:28px; }
+    .server .statusbar > * { flex-shrink:0; }
+    .server .grid, .server .wl { overflow-x:auto; max-width:100%; }
+    .server .grid .gr { min-width:680px; }
+    .server .wl .wr { min-width:700px; }
+    .server .head { flex-wrap:wrap; }
+  }
+  @media (max-width:700px) {
+    .server .shell { display:flex; flex-direction:column; }
+    .server .side { width:100%; height:auto; position:static; border-right:0; border-bottom:1px solid var(--line); }
+    .server .side-nav { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:4px; overflow:visible; scrollbar-gutter:auto; }
+    .server .nav-item { font-size:10px; letter-spacing:.06em; padding:12px 8px; gap:5px; }
+    .server .side-foot { display:none; }
+    .server .app { padding:18px 16px 24px; }
+    .server .rail { width:100%; }
+    .server .head { gap:10px; }
+    .server h1 { font-size:24px; }
+    .server .head .spacer { display:none; }
+    .server .pnl .line { flex-wrap:wrap; }
+    .server .statusbar { gap:14px; }
+    .server .wiz-body { padding:20px 16px; }
+    .server .shift-art { display:none; }
+  }
+</style>
+</head>
+<body>
+<div class="titlebar">
+  <!-- за эту половину окно таскают: класс ищет сам pywebview. Кнопки лежат
+       снаружи неё, иначе нажатие на них тоже начинало бы перетаскивание -->
+  <div class="tb-grab pywebview-drag-region" id="tbGrab">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="6" y="7" width="20" height="4" rx="2" opacity=".32"></rect>
+      <rect x="9" y="14" width="14" height="4" rx="2" class="mid"></rect>
+      <rect x="12" y="21" width="8" height="4" rx="2" opacity=".32"></rect>
+    </svg>
+    <span class="tb-name">Вахта</span>
+  </div>
+  <div class="tb-btns">
+    <button class="tb-btn" id="tbMin" title="Свернуть" aria-label="Свернуть">
+      <svg viewBox="0 0 10 10"><path d="M0 5h10"></path></svg>
+    </button>
+    <button class="tb-btn" id="tbMax" title="Развернуть" aria-label="Развернуть">
+      <svg viewBox="0 0 10 10" id="tbMaxIcon"><rect x=".5" y=".5" width="9" height="9" rx="1"></rect></svg>
+    </button>
+    <button class="tb-btn close" id="tbClose" title="Закрыть" aria-label="Закрыть">
+      <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></svg>
+    </button>
+  </div>
+</div>
+
+<div class="shell">
+  <nav class="side">
+    <div class="side-nav" role="tablist">
+      <button class="nav-item" role="tab" aria-selected="true" data-p="now">
+        <span class="grow">Сейчас</span><i class="live-dot" id="navLive" hidden></i></button>
+      <button class="nav-item" role="tab" aria-selected="false" data-p="sched">
+        <span class="grow">Расписание</span><em class="tally crit" id="tallySched" hidden></em></button>
+      <button class="nav-item" role="tab" aria-selected="false" data-p="games">
+        <span class="grow">Мои игры</span><em class="tally" id="tallyGames" hidden></em></button>
+      <button class="nav-item" role="tab" aria-selected="false" data-p="cat">
+        <span class="grow">Каталог</span><em class="tally" id="tallyCat" hidden></em></button>
+      <button class="nav-item" role="tab" aria-selected="false" data-p="inv">
+        <span class="grow">Инвентарь</span><em class="tally" id="tallyInv" hidden></em></button>
+      <button class="nav-item" role="tab" aria-selected="false" data-p="set">
+        <span class="grow">Настройки</span></button>
+    </div>
+    <div class="side-foot">
+      <div class="label" id="shiftLabel">вахта стоит</div>
+      <div class="shift" id="shiftClock">—:—</div>
+      <div class="since" id="shiftNote">эфира нет</div>
+      <div class="who" id="who" hidden><i id="whoMark"></i><span id="whoName"></span></div>
+    </div>
+  </nav>
+
+  <main class="work">
+    <div class="app">
+      <!-- шапку наполняет экран: метка, заголовок и свои кнопки -->
+      <header class="head" id="head">
+        <div>
+          <div class="stamp" id="screenStamp"></div>
+          <h1 id="screenName">Сейчас</h1>
+        </div>
+        <span class="aside" id="screenAside"></span>
+        <div class="spacer" id="headGap"></div>
+        <div class="chips" id="screenActions"></div>
+      </header>
+
+      <section class="pane on" id="p-now"><div class="stack" id="nowBody"></div></section>
+      <section class="pane" id="p-sched"><div class="stack" id="schedBody"></div></section>
+      <section class="pane" id="p-games"><div class="stack" id="gamesBody"></div></section>
+      <section class="pane" id="p-cat"><div class="stack" id="catBody"></div></section>
+      <section class="pane" id="p-inv"><div class="stack" id="invBody"></div></section>
+      <section class="pane" id="p-set"><div class="stack" id="setBody"></div></section>
+    </div>
+  </main>
+
+  <!-- правую колонку наполняют экраны; пока пусто — её не видно -->
+  <aside class="rail" id="rail"></aside>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="statusbar" id="stBar">
+  <span><i class="beat"></i><b id="stFarm">загрузка</b></span>
+  <span id="stTraffic" hidden>трафик <b></b></span>
+  <span id="stDeadline" hidden>след. дедлайн <b></b></span>
+  <span class="spacer"></span>
+  <span id="stTelegram" hidden>telegram на связи</span>
+  <a class="upd" id="stUpdate" href="#" target="_blank"
+     rel="noopener" hidden><span id="stUpdWord">вышла версия</span> <b></b></a>
+  <span id="stVersion"></span>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const HUES = ["#b98a3e","#4f8fbf","#c4623f","#3f9d90","#a05a7a","#6b8c46","#7c6bb0","#b05f5f"];
+const hue = (id) => HUES[Math.abs([...String(id)].reduce((a,c)=>a*31+c.charCodeAt(0),7)) % HUES.length];
+const initials = (name) => name.split(/\s+/).map(w=>w[0]).join("").slice(0,4).toUpperCase();
+
+function art(cls, name, boxArt, id) {
+  if (boxArt) return `<span class="art ${cls}"><img src="${esc(boxArt)}" alt="" loading="lazy"></span>`;
+  return `<span class="art ${cls}" style="color:${hue(id||name)}">${esc(initials(name))}</span>`;
+}
+const hours = (m) => m >= 60 ? `${Math.floor(m/60)} ч ${m%60 ? (m%60)+" м" : ""}`.trim() : `${m} мин`;
+const plural = (n, one, few, many) =>
+  [11,12,13,14].includes(n % 100) ? many : ({1:one, 2:few, 3:few, 4:few})[n % 10] || many;
+const clock = (iso) => new Date(iso).toLocaleString("ru-RU",
+  { day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" });
+const hhmm = (iso) => new Date(iso).toLocaleTimeString("ru-RU",
+  { hour:"2-digit", minute:"2-digit" });
+const dmy = (iso) => new Date(iso).toLocaleDateString("ru-RU",
+  { day:"2-digit", month:"2-digit" });
+// «54:50» — часы с минутами. Для сумм эфира: «54 ч 50 м» в строку не влезает
+const hm = (m) => `${Math.floor(m / 60)}:${String(Math.round(m % 60)).padStart(2, "0")}`;
+// календарное время: до двух суток понятнее в часах, дальше — в днях
+const wall = (m) => {
+  if (m < 2880) return hours(Math.round(m));
+  const days = Math.round(m / 1440);
+  return `${days} ${plural(days, "день", "дня", "дней")}`;
+};
+const DAYS = ["вс","пн","вт","ср","чт","пт","сб"];
+/* «Когда будет доделано». До минуты это важно только на сегодня-завтра; внутри
+   недели день недели читается сам, а дальше «ср» уже ничего не значит — нужна
+   дата. Кампания с редким эфиром теперь запросто тянется восемь суток. */
+const doneBy = (when) => {
+  const day = midnight(when), today = midnight(new Date());
+  if (day === today) return `сегодня ${hhmm(when)}`;
+  if (day - today < 6 * 86400000) return `${DAYS[new Date(when).getDay()]} ${hhmm(when)}`;
+  return `до ${dmy(when)}`;
+};
+const midnight = (d) => { const c = new Date(d); c.setHours(0,0,0,0); return +c; };
+// следующая полночь, а не «плюс сутки»: переход на зимнее время сдвинул бы день
+const nextDay = (key) => { const c = new Date(key); c.setDate(c.getDate() + 1); return +c; };
+
+async function get(url, opts) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) { location.replace('/auth/login'); throw new Error('Нужен вход'); }
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/* ---------- Сейчас ---------- */
+/* Добавить игру в вотчлист. Просят об этом с двух экранов: из «Моих игр» и
+   с пустого «Сейчас», где это единственное осмысленное действие. */
+async function addGame(input, note, after) {
+  const name = input.value.trim();
+  if (!name) return;
+  const r = await fetch("/api/watchlist", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ game: name }) });
+  const data = await r.json();
+  note.textContent = r.ok
+    ? (data.added ? `Добавил: ${data.name}` : `${data.name} уже в вотчлисте`)
+    : data.error;
+  if (!r.ok) return;
+  input.value = "";
+  if (after) after(); else { planCache = null; tick(); }
+}
+
+/* Подсказки при вводе названия игры.
+   Список — из своей базы: каталог Twitch, приехавший со сборкой, плюс игры,
+   которые «Вахта» видела сама, плюс сегодняшние кампании. Раньше здесь были
+   только девяносто игр с активными дропсами — по замеру, который говорил, что
+   каталог не нужен. Замер был верен, но не покрывал случая, ради которого сюда
+   и приходят чаще всего: завести игру, у которой кампании **сегодня** нет,
+   чтобы она подхватилась сама, когда дропсы появятся. Такую в списке из
+   девяноста не найти по определению.
+   Сети запрос не требует, поэтому и работает всегда — в том числе без токена.
+   Игру не из списка добавляют как раньше — поиском по названию. */
+let gameHints = null;
+
+async function fillGameHints() {
+  if (gameHints) return;
+  gameHints = [];  // вторая попытка не нужна: список за сессию не меняется
+  let names = [];
+  try {
+    names = (await get("/api/games")).games || [];
+  } catch (e) {
+    return;  // служба не ответила — поле остаётся обычным, ввод работает
+  }
+  gameHints = names;
+  const list = document.createElement("datalist");
+  list.id = "dropGames";
+  list.innerHTML = names.map(n => `<option value="${esc(n)}">`).join("");
+  document.body.append(list);
+  // список появился позже полей — перевешиваем привязку, чтобы наверняка
+  document.querySelectorAll('[list="dropGames"]').forEach(el => el.setAttribute("list", "dropGames"));
+}
+
+/* Список подтягивается по фокусу, а не при отрисовке: кто игру не добавляет,
+   тот и запроса не делает. */
+function hintGames(input) {
+  if (!input) return;
+  input.setAttribute("list", "dropGames");
+  input.addEventListener("focus", fillGameHints, { once: true });
+}
+
+/* Шапка экрана: кнопки ставит сам экран, оболочка только держит место. */
+const screenActions = (html) => { $("screenActions").innerHTML = html; };
+
+function wireRefresh() {
+  const btn = $("refresh");
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.textContent = "Пересчёт…";
+    planCache = await get("/api/replan", { method: "POST" });
+    await tick();
+  };
+}
+
+/* Запас задачи — сколько ещё можно тянуть, прежде чем она перестанет
+   помещаться: от конца её последнего блока до дедлайна. Считается по плану,
+   службе для этого ничего досчитывать не нужно. */
+function slackOf(plan) {
+  const last = {};
+  for (const b of plan.blocks) {
+    const end = +new Date(b.end);
+    if (!(b.game_id in last) || end > last[b.game_id]) last[b.game_id] = end;
+  }
+  return plan.tasks
+    .filter(t => t.game_id in last)
+    .map(t => ({ task: t, minutes: (+new Date(t.deadline) - last[t.game_id]) / 60000 }))
+    .sort((a, b) => a.minutes - b.minutes);
+}
+
+// Меньше шести часов запаса — «в обрез». Порог не с потолка: запас считается
+// в эфирных минутах, а эфир идёт не круглые сутки, так что шесть эфирных часов
+// это примерно сутки календарных — за это время стример может и не выйти.
+const TIGHT = 360;
+
+function shiftCard(live, paused) {
+  const pct = live.required ? Math.min(100, live.current / live.required * 100) : 0;
+  const left = Math.max(0, live.required - live.current);
+  if (paused) {
+    return `<div class="shift-card paused">
+      ${art("md", live.game || "—", live.boxArt, live.game)}
+      <div class="shift-body">
+        <div class="shift-top"><h3>${esc(live.game)}</h3>
+          <span class="sub">· смена остановлена на ${live.current} из ${live.required} мин</span></div>
+        <div class="track dim"><i style="width:${pct}%"></i></div>
+        <div class="said">Прогресс сохранён. Twitch засчитывает просмотр только пока идёт
+          эфир — за время паузы счётчик не двигается.</div>
+      </div></div>`;
+  }
+  return `<div class="shift-card">
+    ${art("md", live.game, live.boxArt, live.game)}
+    <div class="shift-body">
+      <div class="shift-top"><h3>${esc(live.game)}</h3><div class="spacer"></div>
+        <span class="pill ${live.note === "в эфире" ? "live" : "mute"}">
+          <i class="dot"></i>${esc(live.note)}</span></div>
+      <div class="sub" style="margin:-6px 0 10px">${esc(live.campaign)}${
+        live.channel ? " · канал " + esc(live.channel) : ""}</div>
+      ${live.required ? `<div class="track"><i style="width:${pct}%"></i></div>
+      <div class="under">
+        <span>${live.current} / ${live.required} мин${
+          live.drops ? ` · дроп ${live.drop} из ${live.drops}` : ""}</span>
+        <span>осталось ${hours(left)}</span>
+      </div>`
+      // пока канал не найден, минут ещё нет: пустая полоса и «0 / 0 мин»
+      // читаются как поломка, хотя это нормальное начало смены
+      : `<div class="said">Ищу стрим, на котором идёт эта кампания. Живые каналы
+          по игре есть не всегда — если не найдётся, окно уйдёт следующей
+          задаче, а к этой «Вахта» вернётся сама.</div>`}
+    </div></div>`;
+}
+
+/* График смен: блоки плана, разложенные по дням.
+
+   Блоки пересекаются, и это не ошибка: эфир делится, а не резервируется —
+   пока по одной игре никто не стримит, «Вахта» смотрит другую. Поэтому сутки
+   собираются не из отрезков подряд, а из ожидаемых минут: сколько эфира
+   кампания наберёт именно в этот день. Блок, накрывающий несколько суток,
+   попадает в каждые своей частью. */
+function board(plan, live) {
+  // «не влезает целиком» и «не успеваем вообще ничего» — разные вещи: первое
+  // норма (последняя веха не влезла), второе повод вмешаться
+  const partial = new Set(plan.shortfalls.filter(s => s.reachable).map(s => s.campaign));
+  const bad = new Set(plan.shortfalls.filter(s => !s.reachable).map(s => s.campaign));
+  const tight = new Set(slackOf(plan).filter(s => s.minutes < TIGHT).map(s => s.task.campaign));
+  const byDay = new Map();
+  for (const b of plan.blocks) {
+    const from = +new Date(b.start), to = +new Date(b.end), span = to - from;
+    for (let key = midnight(b.start); key < to; key = nextDay(key)) {
+      const till = nextDay(key);
+      const head = Math.max(from, key), tail = Math.min(to, till);
+      if (tail <= head) continue;
+      const air = span ? b.minutes * (tail - head) / span : b.minutes;
+      // строка «0 мин» ничего не сообщает: округлилось в ноль — значит за эти
+      // сутки по кампании не наберётся и минуты
+      if (Math.round(air) < 1) continue;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push({
+        ...b, from: head, to: tail, minutes: air,
+        opens: head > key, closes: tail < till,
+      });
+    }
+  }
+
+  let rows = "";
+  const today = midnight(new Date());
+  for (const [key, slices] of [...byDay].sort((a, b) => a[0] - b[0])) {
+    const when = new Date(key);
+    const name = key === today
+      ? `сегодня · ${DAYS[when.getDay()]} ${dmy(when)}`
+      : `${DAYS[when.getDay()]} ${dmy(when)}`;
+    const airtime = slices.reduce((a, s) => a + s.minutes, 0);
+    rows += `<div class="day"><span>${name}</span>
+      <span>эфира ожидается ${hours(Math.round(airtime))}</span></div>`;
+    for (const s of slices.sort((a, b) => a.from - b.from || b.minutes - a.minutes)) {
+      const running = farmingNow && farmingNow === s.campaign;
+      const cls = bad.has(s.campaign) ? "bad" : running ? "on" : "";
+      const state = bad.has(s.campaign) ? `<span class="state bad">решить</span>`
+        : running ? `<span class="state on">идёт</span>`
+        : partial.has(s.campaign) ? `<span class="state warn">не целиком</span>`
+        : tight.has(s.campaign) ? `<span class="state warn">в обрез</span>`
+        : `<span class="state">в плане</span>`;
+      rows += `<div class="slot ${cls}">
+        <div class="when">${slotWhen(s)}<small>${hours(Math.round(s.minutes))}</small></div>
+        <i class="mark"></i>${art("xs", s.game, s.box_art, s.game_id)}
+        <div class="grow"><div class="t">${esc(s.game)}</div>
+          <div class="s">${esc(s.campaign)}</div></div>${state}</div>`;
+    }
+  }
+  // то, чему места не нашлось вовсе: блоков у таких задач нет
+  for (const s of plan.shortfalls) {
+    if (plan.blocks.some(b => b.campaign === s.campaign)) continue;
+    rows += `<div class="slot bad">
+      <div class="when">не влезает<small>нужно ${hours(s.missing)}</small></div>
+      <i class="mark"></i>${art("xs", s.game, "", s.game)}
+      <div class="grow"><div class="t">${esc(s.game)}</div>
+        <div class="s">дедлайн ${dmy(s.deadline)} · не хватает ${hours(s.missing)} эфира</div></div>
+      <span class="state bad">решить</span></div>`;
+  }
+  if (!rows) return "";
+  return `<div><div class="board-h"><span class="label">график смен · 14 дней</span>
+    <span class="aside">кампании идут вперемешку: пока по одной нет эфира, «Вахта»
+      смотрит другую</span></div>
+    <div class="board">${rows}</div></div>`;
+}
+
+/* Что про этот день можно сказать честно. У кампании с редким эфиром блок
+   накрывает сутки целиком, и «00:00→00:00» не значит ничего; у той, что идёт
+   встык, границы как раз и есть ответ. */
+function slotWhen(s) {
+  if (s.opens && s.closes) return `${hhmm(s.from)}→${hhmm(s.to)}`;
+  if (s.opens) return `с ${hhmm(s.from)}`;
+  if (s.closes) return `до ${hhmm(s.to)}`;
+  return "весь день";
+}
+
+/* Сколько эфира нужно плану. Минуты кампаний не складываются: у одной игры
+   их бывает несколько, и один просмотр двигает все — сумма насчитывала бы
+   одну и ту же работу по нескольку раз. Берём самую долгую по каждой игре. */
+function airOf(plan) {
+  const byGame = new Map();
+  for (const t of plan.tasks) {
+    byGame.set(t.game_id, Math.max(byGame.get(t.game_id) || 0, t.minutes));
+  }
+  return [...byGame.values()].reduce((a, b) => a + b, 0);
+}
+
+/* Вилка «что важнее». Выбор здесь всегда об одном — какая из двух кампаний
+   важнее, — и понятен он только когда у обеих сторон видна цена. Прежняя подпись
+   «Отказаться от X» называла одну потерю и сравнить её было не с чем.
+
+   «Оставить как есть» — не кнопка, а то, что случится, если ничего не нажимать.
+   Отдельной кнопкой это было бы обманом: она ничего не делает, а вопрос всё
+   равно вернётся с ближайшим пересчётом. Поэтому просто сказано словами. */
+function fork(s) {
+  if (!s.options.length) return "";
+  const drops = (n) => `${n} ${plural(n, "дроп", "дропа", "дропов")}`;
+  return `<div class="ask">
+    <div class="label">что важнее?</div>
+    ${s.options.map(o => `<button class="btn sm" data-decide="${esc(o.drop_id)}">
+      ${esc(s.game)}
+      <span class="sub" style="margin:3px 0 0;display:block">возьмём ${o.gain} из
+        ${o.total} вместо ${o.keep} · «${esc(o.drop_game)}» перестанем фармить,
+        и ${o.rival_keeps ? `его ${drops(o.rival_keeps)} уйдут` : "его дропы уйдут"}</span>
+    </button>`).join("")}
+    <p class="sub">Оставить как есть — ${esc(s.game)} возьмёт ${s.reachable} из
+      ${s.drops}, ${s.options.map(o => `«${esc(o.drop_game)}» свои
+      ${o.rival_keeps} из ${o.rival_total}`).join(", ")}. Ничего нажимать
+      не нужно.</p></div>`;
+}
+
+/* Правая колонка. Её наполняет экран, оболочка только держит место. */
+function nowRail(live, plan) {
+  // Раньше здесь стояло «конфликтов дедлайнов» красным. Красное — про аварию,
+  // а «последняя веха не влезла» это не авария: янтарное говорит то же самое
+  // и не требует реакции. Красным остаётся только «не успеваем ничего»
+  const partial = plan.shortfalls.length;
+  const nothing = plan.shortfalls.filter(s => s.drops && !s.reachable).length;
+  const work = airOf(plan);
+  let html = `<div class="rail-in"><div class="tiles">
+    <div class="tile"><b>${plan.tasks.length}</b><small>${
+      plural(plan.tasks.length, "кампания", "кампании", "кампаний")} в работе</small></div>
+    <div class="tile"><b>${hm(work)}</b><small>эфира на плане</small></div>
+    <div class="tile ${nothing ? "bad" : partial ? "warn" : ""}"><b>${partial}</b><small>${
+      plural(partial, "кампания", "кампании", "кампаний")} влезает не целиком</small></div>
+    <div class="tile ${plan.unconfident.length ? "warn" : ""}"><b>${plan.unconfident.length}</b>
+      <small>${plural(plan.unconfident.length, "игра", "игры", "игр")} без замеров</small></div></div>`;
+
+  // «Не влезает» — сведение, а не задача. Дропы это вехи одного потока
+  // просмотра, поэтому нехватка означает «последнюю веху не возьмём», а не
+  // «всё впустую». Красным и «решить» это становится только когда не успеваем
+  // вообще ничего и когда есть чем помочь — варианты проверены пересчётом
+  for (const s of plan.shortfalls) {
+    const nothing = s.drops > 0 && s.reachable === 0;
+    html += `<div class="box ${nothing ? "bad" : "warn"}">
+      <div class="label">${nothing ? "не успеваем" : "влезает не целиком"}</div>
+      <p>${esc(s.game)} · ${esc(s.campaign)}. Дедлайн ${dmy(s.deadline)}, не хватает
+        <b>${hours(s.missing)}</b> эфира. ${s.drops
+          ? nothing
+            ? `Ни один из ${s.drops} ${plural(s.drops, "дропа", "дропов", "дропов")} не успеет.`
+            : `<b>Успеем ${s.reachable} ${plural(s.reachable, "дроп", "дропа", "дропов")}
+               из ${s.drops}</b> — не влезает только последний.`
+          : ""}${
+        s.competitors.length ? ` Окно делит ${esc(s.competitors.join(", "))}.` : ""}</p>
+      ${fork(s)}</div>`;
+  }
+
+  // Без привязанного игрового аккаунта Twitch вообще не открывает дроп-сессию:
+  // прогресс не «идёт медленно», его нет совсем. Это самая дорогая тихая беда
+  // из всех — часы просмотра впустую, — и место ей на том экране, куда смотрят,
+  // а не только в «Каталоге» и «Расписании»
+  if (plan.unlinked.length) {
+    const games = [...new Set(plan.unlinked.map(c => c.game))];
+    const link = plan.unlinked.find(c => c.link)?.link;
+    html += `<div class="box warn"><div class="label">нужна привязка</div>
+      <p>По ${esc(games.join(", "))} прогресс не пойдёт вовсе: пока игровой аккаунт
+        не привязан на сайте издателя, Twitch не начинает дроп-сессию — смотреть
+        такую кампанию бессмысленно. ${plan.unlinked.length}
+        ${plural(plan.unlinked.length, "кампания", "кампании", "кампаний")} ждёт.</p>
+      ${link ? `<div class="acts"><a class="btn sm" href="${esc(link)}" target="_blank"
+        rel="noopener" style="text-decoration:none">Привязать на twitch.tv</a></div>` : ""}
+      </div>`;
+  }
+
+  if (plan.unconfident.length) {
+    html += `<div class="box warn"><div class="label">оценка приблизительная</div>
+      <p>По ${esc(plan.unconfident.join(", "))} ещё мало замеров эфира — сколько времени
+        по игре реально идут стримы с дропсами, пока считается грубо. График уточнится сам.</p>
+      </div>`;
+  }
+
+  if (live.today.length) {
+    html += `<div><div class="label" style="margin-bottom:6px">забрано сегодня</div>` +
+      live.today.map(t => `<div class="taken">${art("xs", t.game, t.box_art, t.game_id)}
+        <span class="grow">${esc(t.game)} · ${esc(t.drop)}</span>
+        <span class="at">${hhmm(t.at)}</span></div>`).join("") + `</div>`;
+  }
+  return html + `</div>`;
+}
+
+/* Пока смены нет, экран показывает то, чем служба занята. Одного слова мало:
+   обход вотчлиста идёт минутами, и «обхожу список игр» без объяснения читается
+   как «зависло». Поясняем только долгие состояния — для остальных слово
+   говорит само за себя. */
+const NOTE_HINT = {
+  "обхожу список игр": `Спрашиваю Twitch по каждой игре из списка: какие кампании
+    открыты и сколько по ним осталось. На десятке игр это занимает минуты — фарм
+    начнётся сразу после обхода, ждать ничего не нужно.`,
+  "возвращаюсь": "Пауза снята, сейчас пересоберу график и вернусь в эфир.",
+  "нужен вход в Twitch": `Просмотр засчитывается тому аккаунту, под которым
+    «Вахта» смотрит. Войти — во вкладке «Настройки».`,
+  "нет связи с Twitch": "Проверю ещё раз сама, ничего нажимать не нужно.",
+};
+
+/* Домен в надписи меняется, поэтому подсказка ищется не по всему слову.
+   Совет один и тот же: если один домен Twitch не открывается, а остальные
+   работают, дело почти всегда в фильтре — spade.twitch.tv лежит в блок-листах
+   трекеров, и без него минуты не засчитываются вовсе. */
+const BLOCKED_HINT = `Остальные домены Twitch при этом отвечают, значит дело
+  не в интернете, а в фильтре: этот адрес режет блокировщик рекламы, DNS-сервер
+  или антивирус. Через spade.twitch.tv Twitch считает минуты просмотра, и он есть
+  в списках трекеров — добавь его в исключения, и фарм пойдёт сам.`;
+
+function noteCard(note) {
+  const hint = note.endsWith("не открывается") ? BLOCKED_HINT : NOTE_HINT[note];
+  return `<div class="nothing" style="padding:34px 40px"><div class="void">
+    <h2>${esc(note)}</h2>${hint ? `<p>${hint}</p>` : ""}</div></div>`;
+}
+
+function renderNow(live, plan) {
+  const paused = !!live.paused_since;
+  const empty = !plan.tasks.length && !live.farming;
+  const now = new Date();
+
+  $("head").hidden = empty;
+  $("screenStamp").textContent =
+    `${DAYS[now.getDay()]} · ${dmy(now)} · ${hhmm(now)}`;
+
+  if (empty) {
+    screenActions("");  // пересчитывать нечего, вставать на паузу — тоже
+    $("nowBody").innerHTML = `<div class="void">
+      <svg class="mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+        <rect x="6" y="7" width="20" height="4" rx="2" opacity=".5"></rect>
+        <rect x="9" y="14" width="14" height="4" rx="2"></rect>
+        <rect x="12" y="21" width="8" height="4" rx="2" opacity=".5"></rect></svg>
+      <h2>смен нет</h2>
+      <p>Добавь игры, за которыми стоит следить, — программа сама найдёт кампании,
+        посчитает эфир и построит график. Игру можно добавить до того, как по ней
+        появится кампания: каталог обходится раз в полчаса, и я сообщу, когда она
+        откроется.</p>
+      <div class="addrow" style="padding:0;border:0">
+        <input id="voidGame" placeholder="Название игры, например Rust">
+        <button class="btn primary" id="voidAdd">Добавить</button></div>
+      <div class="hint" id="voidNote">или открой каталог${
+        live.shell.counts.cat ? " · " + live.shell.counts.cat + " активных кампаний" : ""}</div></div>`;
+    $("rail").innerHTML = "";
+    $("voidAdd").onclick = () => addGame($("voidGame"), $("voidNote"));
+    $("voidGame").onkeydown = (e) => { if (e.key === "Enter") $("voidAdd").click(); };
+    hintGames($("voidGame"));
+    return;
+  }
+
+  if (paused) {
+    const lost = Math.round((Date.now() - +new Date(live.paused_since)) / 60000);
+    $("screenName").textContent = `Вахта на паузе · ${hours(lost)}`;
+    screenActions(`<button class="btn primary sm" id="doResume">Продолжить</button>
+      <button class="btn sm" id="doLogout">Выйти из Twitch</button>`);
+    $("doResume").onclick = async () => {
+      $("doResume").textContent = "Возвращаюсь...";
+      await fetch("/api/resume", { method: "POST" });
+      planCache = null;
+      tick();
+    };
+    $("doLogout").onclick = async () => {
+      await fetch("/api/twitch/logout", { method: "POST" });
+      planCache = null;
+      tick();
+    };
+
+    const soon = slackOf(plan)[0];
+    const цена = [];
+    if (soon) {
+      const when = new Date(Date.now() + soon.minutes * 60000);
+      цена.push(`К ${dmy(when)}, ${hhmm(when)} запас ${esc(soon.task.game)} уйдёт в минус —
+        кампания закроется ${dmy(soon.task.deadline)}.`);
+    }
+    for (const s of plan.shortfalls) {
+      цена.push(`${esc(s.game)} уже не помещается: не хватает ${hours(s.missing)} эфира.`);
+    }
+    $("nowBody").innerHTML = (live.game ? shiftCard(live, true) : "") +
+      (цена.length ? `<div class="warn-box"><div class="label">что будет, если не вернуться</div>
+        <p>${цена.join(" ")}</p></div>` : "") +
+      `<div class="hint" style="margin-top:26px;font-family:var(--mono);font-size:10px;
+        letter-spacing:.18em;text-transform:uppercase;color:var(--faint)">
+        пауза снимается отсюда и командой /pause off в telegram</div>`;
+    $("rail").innerHTML = "";
+    return;
+  }
+
+  // «Смена идёт» — только когда Twitch правда засчитывает минуты. Пока канал
+  // ищется, смена ещё не началась, и говорить обратное значит врать в заголовке
+  $("screenName").textContent = live.note === "в эфире" ? "Смена идёт"
+    : live.farming ? "Ищу канал" : "Сейчас";
+  screenActions(`<button class="btn sm" id="refresh">Пересчитать</button>
+    <button class="btn sm" id="doPause">Пауза</button>`);
+  wireRefresh();
+  $("doPause").onclick = async () => {
+    $("doPause").textContent = "Встаю...";
+    await fetch("/api/pause", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ minutes: 60 }) });
+    planCache = null;
+    tick();
+  };
+
+  $("nowBody").innerHTML =
+    (live.farming ? shiftCard(live, false) : noteCard(live.note)) +
+    board(plan, live);
+  $("rail").innerHTML = nowRail(live, plan);
+
+  document.querySelectorAll("[data-decide]").forEach(b => b.onclick = async () => {
+    b.textContent = "Применяю...";
+    await fetch("/api/decide/" + b.dataset.decide, { method: "POST" });
+    planCache = await get("/api/plan");
+    tick();
+  });
+}
+
+/* ---------- Расписание ---------- */
+let schedFilter = "all";  // все · риск · завершённые
+
+/* Запас по кампаниям: сколько ещё можно тянуть до дедлайна. Считается по
+   плану — дедлайн минус конец последнего блока; у того, что не помещается,
+   запас отрицательный и равен нехватке. `till` — тот самый конец, то есть
+   когда работа будет доделана: теперь кампании идут вперемешку, и «когда
+   начнётся» почти у всех «сейчас», а вот «когда закончится» — разное. */
+function slackByCampaign(plan) {
+  const last = {}, first = {}, work = {};
+  for (const b of plan.blocks) {
+    const from = +new Date(b.start), to = +new Date(b.end);
+    if (!(b.campaign in first) || from < first[b.campaign]) first[b.campaign] = from;
+    if (!(b.campaign in last) || to > last[b.campaign]) last[b.campaign] = to;
+    work[b.campaign] = (work[b.campaign] || 0) + b.minutes;
+  }
+  const gaps = new Map(plan.shortfalls.map(s => [s.campaign, s]));
+  const out = new Map();
+  for (const t of plan.tasks) {
+    const gap = gaps.get(t.campaign);
+    out.set(t.campaign, {
+      task: t,
+      minutes: gap ? -gap.missing
+        : t.campaign in last ? (+new Date(t.deadline) - last[t.campaign]) / 60000 : 0,
+      from: first[t.campaign] ?? null,
+      till: last[t.campaign] ?? null,
+      work: work[t.campaign] ?? t.minutes,
+      gap,
+    });
+  }
+  return out;
+}
+
+function slackCell(minutes, scale) {
+  if (minutes === null) {
+    return `<div class="slack none"><div class="bar2"></div><em>—</em></div>`;
+  }
+  const over = minutes < 0;
+  const cls = over ? "over" : minutes < TIGHT ? "tight" : "";
+  const width = over ? 100 : Math.max(4, Math.min(100, minutes / scale * 100));
+  return `<div class="slack ${cls}"><div class="bar2"><i style="width:${width}%"></i></div>
+    <em>${over ? "−" : "+"}${hours(Math.abs(Math.round(minutes)))}</em></div>`;
+}
+
+function renderPlan(plan) {
+  const slack = slackByCampaign(plan);
+  const risky = [...slack.values()].filter(s => s.minutes < TIGHT);
+  const scale = Math.max(60, ...[...slack.values()].map(s => Math.max(0, s.minutes)));
+  const work = airOf(plan);
+  const games = new Set(plan.tasks.map(t => t.game_id)).size;
+  const nearest = plan.shortfalls[0];
+
+  const chips = [
+    ["all", "Все", plan.tasks.length + plan.unlinked.length + (plan.waiting || []).length
+      + (plan.stuck || []).length + (plan.refused || []).length],
+    ["risk", "В обрез", risky.length],
+    ["done", "Завершённые", plan.done.length],
+  ];
+
+  let rows = "";
+  let shown = [];   // те же кампании рисует Гант — фильтр у них общий
+  if (schedFilter === "done") {
+    for (const c of plan.done) {
+      rows += `<div class="gr"><span class="win">закрыта</span>
+        <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+          <span class="t">${esc(c.game)}</span><span class="s">${esc(c.campaign)}</span></div>
+        ${slackCell(null)}<span class="dl">${clock(c.deadline)}</span>
+        <span class="state">забрано</span></div>`;
+    }
+  } else {
+    // по концу работы, а не по началу: начинается всё сразу, отличается только
+    // то, когда закончится
+    shown = [...slack.values()]
+      .filter(s => schedFilter !== "risk" || s.minutes < TIGHT)
+      .sort((a, b) => (a.till ?? Infinity) - (b.till ?? Infinity));
+    for (const s of shown) {
+      // «Идёт» — про то, что фармится на самом деле, а не про то, что стоит
+      // первым в плане: голова плана может быть пропущена, если по игре нет
+      // канала, и тогда график врал бы «идёт» на простаивающей кампании
+      const t = s.task;
+      const running = farmingNow && farmingNow === t.campaign;
+      const quiet = (plan.quiet || []).includes(t.game_id);
+      const when = s.till === null
+        ? "нет окна"
+        : `${doneBy(s.till)} · ${hours(Math.round(s.work))}`;
+      const state = s.gap && s.gap.drops && !s.gap.reachable
+          ? `<span class="state bad">решить</span>`
+        : s.gap ? `<span class="state warn">не целиком</span>`
+        : running ? `<span class="state on">идёт</span>`
+        : quiet ? `<span class="state warn">нет канала</span>`
+        : s.minutes < TIGHT ? `<span class="state warn">в обрез</span>`
+        : `<span class="state">в плане</span>`;
+      rows += `<div class="gr ${
+        s.gap && s.gap.drops && !s.gap.reachable ? "bad" : running ? "on" : ""}">
+        <span class="win">${when}</span>
+        <div class="camp">${art("xs", t.game, t.box_art, t.game_id)}
+          <span class="t">${esc(t.game)}</span><span class="s">${esc(t.campaign)}</span></div>
+        ${slackCell(s.minutes, scale)}<span class="dl">${clock(t.deadline)}</span>
+        ${state}</div>`;
+    }
+    // без привязанного игрового аккаунта прогресс не идёт вообще, поэтому
+    // планировщик такие кампании в работу не берёт — но показать их надо
+    if (schedFilter === "all") {
+      for (const c of plan.unlinked) {
+        rows += `<div class="gr"><span class="win">${hours(c.minutes)}</span>
+          <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+            <span class="t">${esc(c.game)}</span>
+            <span class="s warn">аккаунт не привязан</span></div>
+          ${slackCell(null)}<span class="dl">${clock(c.deadline)}</span>
+          ${c.link ? `<a class="state warn" href="${esc(c.link)}" target="_blank"
+            rel="noopener" style="text-decoration:none">привязать</a>`
+            : `<span class="state warn">привязать</span>`}</div>`;
+      }
+      // от чего отказались при разборе конфликта. Решение человека, но
+      // невидимое и необратимое решение — это ловушка: одно нажатие мимо,
+      // и кампания пропадает молча. Показываем и даём вернуть
+      for (const c of (plan.refused || [])) {
+        rows += `<div class="gr"><span class="win">отказ</span>
+          <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+            <span class="t">${esc(c.game)}</span>
+            <span class="s">${esc(c.campaign)} · ${hours(c.minutes)} эфира</span></div>
+          ${slackCell(null)}<span class="dl">${clock(c.deadline)}</span>
+          <button class="state" data-return="${esc(c.id)}">вернуть</button></div>`;
+      }
+      // Фармить нельзя вовсе: по замерам канала с этой кампанией не бывает.
+      // В плане её нет намеренно — планировать «по проценту в сутки» значило бы
+      // выдумывать работу, — но причина видна, и по ней понятно, ждать или нет
+      for (const c of (plan.waiting || [])) {
+        rows += `<div class="gr"><span class="win">ждёт эфира</span>
+          <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+            <span class="t">${esc(c.game)}</span>
+            <span class="s warn">${esc(c.campaign)} · ${esc(c.reason)}</span></div>
+          ${slackCell(null)}<span class="dl">${clock(c.deadline)}</span>
+          <span class="state warn">ждёт</span></div>`;
+      }
+      // отложенные обходчиком: Twitch считает время, но дроп не отдаёт.
+      // Окно ушло другой кампании, но пропасть с экрана они не должны
+      for (const c of (plan.stuck || [])) {
+        rows += `<div class="gr bad"><span class="win">до ${hhmm(c.until)}</span>
+          <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+            <span class="t">${esc(c.game)}</span>
+            <span class="s warn">${esc(c.reason || "отложена")} — вернусь позже</span></div>
+          ${slackCell(null)}<span class="dl">${c.deadline ? clock(c.deadline) : "—"}</span>
+          ${c.link ? `<a class="state bad" href="${esc(c.link)}" target="_blank"
+            rel="noopener" style="text-decoration:none">проверить привязку</a>`
+            : `<span class="state bad">отложена</span>`}</div>`;
+      }
+    }
+  }
+
+  // пример про эфирное время берём с самой «редкой» игры, у которой есть замеры
+  const rare = plan.tasks.filter(t => t.confident)
+    .sort((a, b) => a.availability - b.availability)[0];
+
+  $("schedBody").innerHTML = `
+    <div class="summary">
+      <div class="cell"><div class="label">эфира на плане</div><b>${hm(work)}</b>
+        <small>${plan.tasks.length} ${plural(plan.tasks.length, "кампания", "кампании", "кампаний")},
+          ${games} ${plural(games, "игра", "игры", "игр")}</small></div>
+      <div class="cell ${plan.shortfalls.some(s => s.drops && !s.reachable) ? "bad"
+          : plan.shortfalls.length ? "warn" : ""}">
+        <div class="label">влезает не целиком</div>
+        <b>${plan.shortfalls.length}</b>
+        <small>${nearest
+          ? esc(nearest.game) + " · возьмём " + nearest.reachable + " из " + nearest.drops
+          : "всё помещается"}</small></div>
+      <div class="cell ${plan.unlinked.length ? "warn" : ""}"><div class="label">без привязки</div>
+        <b>${plan.unlinked.length}</b>
+        <small>${plan.unlinked.length ? "прогресс = 0" : "все аккаунты привязаны"}</small></div>
+    </div>
+
+    <div class="board-h"><span class="label">график смен</span>
+      <span class="aside">14 дней вперёд, по эфирному времени: кампании идут вперемешку</span>
+      <div style="flex:1 1 auto"></div>
+      <div class="chips">${chips.map(([id, name, n]) => `<button class="btn sm${
+        schedFilter === id ? " on" : ""}" data-filter="${id}">${name}${
+        n ? ` <span style="color:var(--faint)">${n}</span>` : ""}</button>`).join("")}</div></div>
+
+    ${gantt(plan, shown)}
+
+    ${rows ? `<div class="grid">
+      <div class="gh"><span>когда</span><span>кампания</span><span>запас до дедлайна</span>
+        <span>дедлайн</span><span>статус</span></div>${rows}</div>`
+      : `<div class="nothing"><div class="void"><h2>${schedFilter === "risk"
+        ? "Всё помещается" : schedFilter === "done" ? "Закрытых пока нет" : "Фармить нечего"}</h2>
+        <p>${schedFilter === "risk"
+        ? "Ни одна кампания не упирается в дедлайн: запас есть у всех."
+        : schedFilter === "done" ? "Сюда попадают кампании, по которым забрано всё."
+        : "По играм из списка активных кампаний сейчас нет — открывшуюся заметит обход."}</p>
+        </div></div>`}
+
+    ${rare ? `<div class="note-under">Запас считается по накопленной статистике эфира:
+      у ${esc(rare.game)} стримы с дропсами идут около ${Math.round(rare.availability * 24)} ч
+      в сутки, поэтому ${hours(rare.minutes)} эфира растянутся
+      на ${wall(rare.minutes / rare.availability)} календарного времени.</div>` : ""}`;
+
+  $("schedBody").querySelectorAll("[data-return]").forEach(b => b.onclick = async () => {
+    b.textContent = "возвращаю…";
+    await fetch("/api/decide/" + b.dataset.return, { method: "DELETE" });
+    planCache = null;
+    tick();
+  });
+
+  $("schedBody").querySelectorAll("[data-filter]").forEach(b => b.onclick = () => {
+    schedFilter = b.dataset.filter;
+    renderPlan(plan);
+  });
+}
+
+/* Диаграмма Ганта — главный вид «Расписания».
+   Строками таблица отвечала на «сколько запаса и почему», но не на «когда»:
+   план с 30 июля делит эфир, а не резервирует календарь, поэтому кампании
+   идут вперемешку, полосы пересекаются и у каждой своя доля. Это видно только
+   картинкой; таблица осталась под ней и отвечает на прежние вопросы.
+
+   Толщина полосы — доля эфира: во всю высоту значит «окно целиком её»,
+   вполовину — «делит с кем-то поровну». Без этого две пересекающиеся полосы
+   читались бы как «оба фармятся полностью», а так не бывает. */
+const DAY = 86400000;
+
+function ganttRow(blocks, deadline, t0, span, tone) {
+  const at = (ms) => Math.max(0, Math.min(100, (ms - t0) / span * 100));
+  const bars = blocks.map(b => {
+    const left = at(+new Date(b.start));
+    const right = at(+new Date(b.end));
+    // Доля показывается высотой. Не «доля × высота строки»: у кампании с десятью
+    // процентами полоса вышла бы в три пикселя и слилась бы с линией сетки.
+    // Растягиваем в диапазон 30–100%, зато порядок сохраняется — равная
+    // толщина всегда значит равную долю
+    const thick = Math.round(30 + Math.min(1, b.share || 1) * 70);
+    return `<i class="bar ${tone}" style="left:${left}%;width:${
+      Math.max(0.6, right - left)}%;height:${thick}%"
+      title="${esc(b.game)} · ${esc(b.campaign)}\n${clock(b.start)} — ${clock(b.end)}\n${
+        hours(b.minutes)} эфира, ${Math.round((b.share || 1) * 100)}% окна"></i>`;
+  }).join("");
+  const mark = deadline && +new Date(deadline) <= t0 + span
+    ? `<i class="dl-mark" style="left:${at(+new Date(deadline))}%"
+         title="дедлайн ${clock(deadline)}"></i>` : "";
+  return bars + mark;
+}
+
+function gantt(plan, shown) {
+  if (!shown.length || !plan.starts_at) return "";
+  const t0 = +new Date(plan.starts_at);
+  // конец шкалы — самый дальний из концов работы и дедлайнов, но не больше
+  // горизонта плана: иначе одна кампания с дедлайном через полгода сплющила бы
+  // все остальные в первый пиксель
+  const ends = [
+    ...plan.blocks.map(b => +new Date(b.end)),
+    ...shown.map(s => s.task.deadline ? +new Date(s.task.deadline) : 0),
+  ].filter(Boolean);
+  const t1 = Math.min(+new Date(plan.ends_at), Math.max(t0 + DAY, ...ends));
+  const span = Math.max(DAY, t1 - t0);
+
+  // Сетка по суткам: полночь по местному времени, а не «через 24 часа от
+  // сейчас» — глазу нужны понедельник и вторник, а не отметки от старта
+  const ticks = [];
+  const first = new Date(t0);
+  first.setHours(0, 0, 0, 0);
+  for (let d = +first + DAY; d < t1; d += DAY) {
+    const left = (d - t0) / span * 100;
+    // Ближайшая полночь может оказаться в паре часов от старта — тогда её
+    // подпись садится поверх «сейчас». Линию оставляем, подпись убираем:
+    // без неё сетка читается, а поверх друг друга не читается ничего
+    ticks.push(`<i class="tick" style="left:${left}%"></i>${left < 6 ? "" :
+      `<em class="tick-t" style="left:${left}%">${
+        new Date(d).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}</em>`}`);
+  }
+
+  const rows = shown.map(s => {
+    const t = s.task;
+    const mine = plan.blocks.filter(
+      b => b.campaign === t.campaign && b.game_id === t.game_id);
+    const running = farmingNow && farmingNow === t.campaign;
+    const tone = s.gap && s.gap.drops && !s.gap.reachable ? "bad"
+      : s.gap || s.minutes < TIGHT ? "warn"
+      : running ? "on" : "";
+    return `<div class="gan-r">
+      <div class="gan-n">${art("xs", t.game, t.box_art, t.game_id)}
+        <span class="t">${esc(t.game)}</span></div>
+      <div class="gan-t">${mine.length
+        ? ganttRow(mine, t.deadline, t0, span, tone)
+        : `<span class="gan-none">нет окна</span>`}</div></div>`;
+  }).join("");
+
+  return `<div class="gantt">
+    <div class="gan-r gan-h"><div class="gan-n">кампания</div>
+      <div class="gan-t">${ticks.join("")}<em class="tick-t now">сейчас</em></div></div>
+    ${rows}
+    <div class="gan-legend">Полоса — когда идёт просмотр, её толщина — какая доля
+      эфира достаётся кампании: эфир делится, поэтому полосы и пересекаются.
+      Штрих — дедлайн.</div></div>`;
+}
+
+/* ---------- Мои игры ----------
+   Порядок = кто получит окно, когда две кампании просят одно время. Правило
+   перетаскивания и подписи — из design/notes.md, там оно расписано по шагам.
+   Порядок сохраняется сразу, график пересчитывается только по «Применить». */
+const GRIP = `<svg viewBox="0 0 8 12" aria-hidden="true"><circle cx="1.5" cy="1.5" r="1.5"/>
+  <circle cx="6.5" cy="1.5" r="1.5"/><circle cx="1.5" cy="6" r="1.5"/>
+  <circle cx="6.5" cy="6" r="1.5"/><circle cx="1.5" cy="10.5" r="1.5"/>
+  <circle cx="6.5" cy="10.5" r="1.5"/></svg>`;
+const WL_HEAD = 6;  // сколько строк видно до сворачивания хвоста
+
+let wlRows = [];        // вотчлист как он сейчас на экране
+let wlOpen = false;     // раскрыт ли хвост списка
+let wlDirty = null;     // {game_id, from} — что переехало и откуда
+let wlPreview = null;   // план, каким он станет после «Применить»
+
+function wlPlace(n, total) {
+  return n === 1 ? "станет первым" : n === total ? "станет последним" : `будет ${n}-й`;
+}
+
+function wlRow(g, index, total) {
+  const share = g.availability;
+  const airtime = share === null ? "нет замеров"
+    : `${hours(Math.round(share * 1440))}${g.samples ? ` · ${g.samples} ${
+        plural(g.samples, "замер", "замера", "замеров")}` : ""}`;
+  const cls = share === null ? "none" : share < 0.3 ? "thin" : "";
+  const state = wlState(g);
+  return `<div class="wr" data-row="${esc(g.game_id)}" data-index="${index}" tabindex="0">
+    <button class="grip" data-grip="${esc(g.game_id)}" title="Тащи или Alt+↑↓"
+      aria-label="Переместить ${esc(g.name)}">${GRIP}</button>
+    <input class="num" data-pos="${esc(g.game_id)}" value="${index + 1}"
+      inputmode="numeric" autocomplete="off" title="Впиши номер и нажми Enter"
+      aria-label="Место ${esc(g.name)} в списке">
+    <div class="who2">${art("xs", g.name, g.box_art, g.game_id)}
+      <div style="min-width:0"><div class="t">${esc(g.name)}</div>
+        ${state.sub ? `<div class="s ${state.dim ? "dim" : ""}">${state.sub}</div>` : ""}</div></div>
+    <div class="air ${cls}"><div class="bar2"><i style="width:${
+      share === null ? 0 : Math.round(share * 100)}%"></i></div><em>${airtime}</em></div>
+    <span class="state ${state.tone}">${state.word}</span>
+    <button class="btn sm danger" data-rm="${esc(g.game_id)}"
+      style="font-size:10px;letter-spacing:.12em;text-transform:uppercase">убрать</button></div>`;
+}
+
+/* Что с игрой происходит прямо сейчас. Берётся из плана, а не из вотчлиста:
+   сам вотчлист знает только порядок и статистику эфира. */
+function wlState(g) {
+  const plan = planCache;
+  if (!plan) return { word: "", tone: "", sub: "" };
+  if (plan.unlinked.some(c => c.game_id === g.game_id)) {
+    return { word: "привязать", tone: "warn", sub: "аккаунт не привязан — прогресс 0" };
+  }
+  const gap = plan.shortfalls.find(s => s.game === g.name);
+  if (gap) {
+    return gap.drops && !gap.reachable
+      ? { word: "не успеваем", tone: "bad", sub: "" }
+      : { word: "не целиком", tone: "warn",
+          sub: `возьмём ${gap.reachable} из ${gap.drops}` };
+  }
+  if ((plan.waiting || []).some(c => c.game_id === g.game_id)) {
+    return { word: "ждёт эфира", tone: "warn", sub: "нужных каналов нет в эфире" };
+  }
+  // «фармится» — про то, что правда в эфире: голова плана может стоять без
+  // канала, а кампании теперь идут вперемешку, и первый блок больше не значит
+  // «сейчас смотрим именно это»
+  if (farmingNow && plan.tasks.some(t => t.game_id === g.game_id && t.campaign === farmingNow)) {
+    return { word: "фармится", tone: "on", sub: "" };
+  }
+  if (plan.tasks.some(t => t.game_id === g.game_id)) return { word: "в плане", tone: "", sub: "" };
+  if (plan.done.some(c => c.game_id === g.game_id)) return { word: "закрыта", tone: "", sub: "" };
+  return { word: "ждёт", tone: "", sub: "кампаний нет — сообщу, когда откроется", dim: true };
+}
+
+/* Цена изменения: сравниваем запас по нынешнему плану и по тому, каким он
+   станет после пересчёта. Разница и есть то, что меняет порядок. */
+function wlPrice() {
+  if (!wlDirty || !wlPreview || !planCache) return "";
+  const было = slackByCampaign(planCache), стало = slackByCampaign(wlPreview);
+  const дельты = [];
+  for (const [campaign, after] of стало) {
+    const before = было.get(campaign);
+    if (!before) continue;
+    const delta = Math.round(after.minutes - before.minutes);
+    if (Math.abs(delta) >= 1) дельты.push({ game: after.task.game, delta });
+  }
+  дельты.sort((a, b) => b.delta - a.delta);
+  const кто = wlRows.find(g => g.game_id === wlDirty.game_id);
+  const место = wlRows.findIndex(g => g.game_id === wlDirty.game_id) + 1;
+
+  const вниз = дельты.find(d => d.delta < 0);
+  const куда = место === 1 ? "станет первой" : `встанет ${место}-й`;
+  const рассказ = !дельты.length
+    ? `${esc(кто.name)} ${куда}. График от этого не изменится: окна распределяет дедлайн,
+       а порядок решает только ничью.`
+    : вниз
+    ? `${esc(кто.name)} ${куда} — при споре за окно она забирает время
+       у ${esc(вниз.game)}, и запас ${esc(вниз.game)} падает.`
+    : `${esc(кто.name)} ${куда}. Ничей запас от этого не пострадал — окна просто легли плотнее.`;
+
+  return `<div class="box"><div class="label">что меняет порядок</div>
+    <p>${рассказ}</p>
+    <div style="margin-top:12px">
+      ${дельты.map(d => `<div class="price"><span>${esc(d.game)}</span>
+        <em class="${d.delta > 0 ? "up" : "down"}">${d.delta > 0 ? "+" : "−"}${
+          hours(Math.abs(d.delta))}</em></div>`).join("")
+        || `<div class="price"><span>Все игры</span><em>без изменений</em></div>`}
+    </div>
+    <div class="acts"><button class="btn primary sm" id="wlApply">Применить</button>
+      <button class="btn sm" id="wlUndo">Отмена</button></div></div>`;
+}
+
+async function wlLoadPreview() {
+  try {
+    wlPreview = await get("/api/watchlist/preview");
+  } catch {
+    wlPreview = null;
+  }
+  paintGames();
+}
+
+/* Перерисовка без запроса к службе: порядок уже в wlRows. */
+function paintGames() {
+  const total = wlRows.length;
+  const видно = wlOpen ? wlRows : wlRows.slice(0, WL_HEAD);
+  const хвост = wlOpen ? [] : wlRows.slice(WL_HEAD);
+
+  $("gamesBody").innerHTML = total ? `
+    <div class="wl" id="wlList">
+      <div class="wh"><span></span><span>№</span><span>игра</span>
+        <span>эфир в сутки</span><span>сейчас</span><span></span></div>
+      ${видно.map((g, i) => wlRow(g, i, total)).join("")}
+      ${хвост.length ? `<button class="wl-tail" id="wlMore">${WL_HEAD + 1}–${total} ·
+        ${хвост.map(g => esc(g.name)).join(", ")}</button>` : ""}
+    </div>
+    <div class="note-under">Порядок сохраняется сразу. График пересчитывается после
+      «Применить».</div>`
+    : `<div class="nothing"><div class="void"><h2>Список пуст</h2>
+        <p>Добавь игру — следить можно и за той, по которой кампаний ещё нет:
+           обход сам заметит, когда она откроется.</p></div></div>`;
+
+  $("rail").innerHTML = `<div class="rail-in">
+    ${wlPrice()}
+    <div class="addrow" style="border:0;padding:0">
+      <input id="newGame" placeholder="Название игры, например Rust" autocomplete="off">
+      <button class="btn primary" id="addGame">Добавить</button></div>
+    <div class="note" id="addNote" style="padding:0">Поле подсказывает игры, по которым
+      дропсы идут прямо сейчас. Любую другую можно добавить заранее — сканер сам
+      заметит, когда по ней откроется кампания.</div></div>`;
+
+  wireGames();
+}
+
+function wireGames() {
+  const more = $("wlMore");
+  if (more) more.onclick = () => { wlOpen = true; paintGames(); };
+  $("addGame").onclick = () => addGame($("newGame"), $("addNote"), renderGames);
+  $("newGame").onkeydown = (e) => { if (e.key === "Enter") $("addGame").click(); };
+  hintGames($("newGame"));
+
+  $("gamesBody").querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+    await fetch("/api/watchlist/" + b.dataset.rm, { method: "DELETE" });
+    renderGames();
+  });
+
+  const apply = $("wlApply");
+  if (apply) apply.onclick = async () => {
+    apply.textContent = "Пересчёт…";
+    planCache = await get("/api/replan", { method: "POST" });
+    wlDirty = wlPreview = null;
+    paintGames();
+  };
+  const undo = $("wlUndo");
+  if (undo) undo.onclick = async () => {
+    // одна ступень назад: возвращаем строку туда, откуда её взяли
+    await moveGame(wlDirty.game_id, wlDirty.from, { remember: false });
+    wlDirty = wlPreview = null;
+    renderGames();
+  };
+
+  $("gamesBody").querySelectorAll("[data-grip]").forEach(grip => {
+    grip.onmousedown = (e) => startDrag(e, grip.dataset.grip);
+  });
+
+  /* Номер вписывается руками. Перетаскивание хорошо, когда игру двигаешь
+     на соседнее место; «поставь эту седьмой» мышью — это прицеливание,
+     а пальцем в клавиатуру то же самое делается за секунду. */
+  $("gamesBody").querySelectorAll("[data-pos]").forEach(field => {
+    const was = field.value;
+    const go = () => {
+      const n = parseInt(field.value, 10);
+      const from = wlRows.findIndex(g => g.game_id === field.dataset.pos) + 1;
+      // мусор, пусто, вне списка, то же самое — молча возвращаем как было:
+      // ругаться на опечатку в поле из двух символов не за что
+      if (!Number.isInteger(n) || n < 1 || n > wlRows.length || n === from) {
+        field.value = was;
+        return;
+      }
+      moveGame(field.dataset.pos, n);
+    };
+    field.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); field.blur(); }
+      if (e.key === "Escape") { field.value = was; field.blur(); }
+    };
+    field.onblur = go;
+    field.onfocus = () => field.select();
+    // строка вся тащится за ручку — но если тянуть за поле, курсор ставится
+    // в текст, а не начинается перетаскивание. Так и надо
+    field.onmousedown = (e) => e.stopPropagation();
+  });
+  $("gamesBody").querySelectorAll("[data-row]").forEach(row => {
+    row.onkeydown = (e) => {
+      if (!e.altKey) return;
+      const from = wlRows.findIndex(g => g.game_id === row.dataset.row);
+      let to = null;
+      if (e.key === "ArrowUp") to = from - 1;
+      if (e.key === "ArrowDown") to = from + 1;
+      if (e.key === "Home") to = 0;
+      if (to === null || to < 0 || to >= wlRows.length) return;
+      e.preventDefault();
+      moveGame(row.dataset.row, to + 1).then(() => {
+        const again = $("gamesBody").querySelector(`[data-row="${row.dataset.row}"]`);
+        if (again) again.focus();
+      });
+    };
+  });
+}
+
+/* Сохранить порядок. `remember` — запоминать ли, откуда взяли: нужно для
+   «Отмены», но не нужно самой «Отмене», иначе она отменяла бы себя. */
+async function moveGame(gameId, position, { remember = true } = {}) {
+  const from = wlRows.findIndex(g => g.game_id === gameId);
+  const [moved] = wlRows.splice(from, 1);
+  wlRows.splice(position - 1, 0, moved);
+  if (remember && (!wlDirty || wlDirty.game_id !== gameId)) {
+    wlDirty = { game_id: gameId, from: from + 1 };
+  }
+  paintGames();
+  await fetch(`/api/watchlist/${gameId}/move/${position}`, { method: "POST" });
+  if (remember) await wlLoadPreview();
+}
+
+/* Перетаскивание. Строку не двигаем — двигается линия вставки: так видно,
+   куда она встанет, и ничего не прыгает под курсором. */
+function startDrag(event, gameId) {
+  event.preventDefault();
+  const list = $("wlList");
+  const lifted = $("gamesBody").querySelector(`[data-row="${gameId}"]`);
+  if (!list || !lifted) return;
+  const from = wlRows.findIndex(g => g.game_id === gameId);
+  const total = wlRows.length;
+
+  list.classList.add("dragging");
+  lifted.classList.add("lifted");
+  // номер теперь поле ввода: писать надо в `value`, иначе «1→3» не покажется
+  const counter = lifted.querySelector(".num");
+  counter.value = `${from + 1}→${from + 1}`;
+
+  const line = document.createElement("div");
+  line.className = "drop-line";
+  line.innerHTML = `<i></i><i></i><b></b>`;
+  let target = from;
+
+  function place(clientY) {
+    const rows = [...list.querySelectorAll(".wr")];
+    target = rows.length - 1;
+    for (const [i, row] of rows.entries()) {
+      const box = row.getBoundingClientRect();
+      if (clientY < box.top + box.height / 2) { target = i; break; }
+    }
+    const rows2 = [...list.querySelectorAll(".wr")];
+    const anchor = rows2[target];
+    line.querySelector("b").textContent = wlPlace(target + 1, total);
+    counter.value = `${from + 1}→${target + 1}`;
+    if (target >= rows2.length - 1 && clientY > anchor.getBoundingClientRect().bottom) {
+      anchor.after(line);
+    } else {
+      anchor.before(line);
+    }
+  }
+
+  place(event.clientY);
+
+  const onMove = (e) => place(e.clientY);
+  const finish = async (save) => {
+    removeEventListener("mousemove", onMove);
+    removeEventListener("mouseup", onUp);
+    removeEventListener("keydown", onKey);
+    line.remove();
+    list.classList.remove("dragging");
+    lifted.classList.remove("lifted");
+    if (save && target !== from) await moveGame(gameId, target + 1);
+    else paintGames();
+  };
+  const onUp = () => finish(true);
+  const onKey = (e) => { if (e.key === "Escape") finish(false); };
+
+  addEventListener("mousemove", onMove);
+  addEventListener("mouseup", onUp);
+  addEventListener("keydown", onKey);
+}
+
+async function renderGames() {
+  wlRows = await get("/api/watchlist");
+  wlOpen = wlRows.length <= WL_HEAD;
+  $("screenName").textContent = "Мои игры";
+  $("screenStamp").textContent = wlRows.length
+    ? `${wlRows.length} ${plural(wlRows.length, "игра", "игры", "игр")}` : "";
+  screenActions(`<button class="btn sm" id="wlReset">Сбросить порядок</button>`);
+  $("wlReset").onclick = async () => {
+    // сброс — это порядок добавления: он и есть «я ничего не расставлял»
+    const было = wlRows.map(g => g.game_id).join();
+    const заново = [...wlRows].sort((a, b) => a.added.localeCompare(b.added));
+    if (заново.map(g => g.game_id).join() === было) return;
+    for (const [i, g] of заново.entries()) {
+      await fetch(`/api/watchlist/${g.game_id}/move/${i + 1}`, { method: "POST" });
+    }
+    wlDirty = { game_id: заново[0].game_id, from: 1 };
+    await renderGames();
+    await wlLoadPreview();
+  };
+  paintGames();
+}
+
+/* ---------- Инвентарь ----------
+   Два источника в одном экране, и это главное, что про него надо знать:
+   награды приходят из инвентаря Twitch, а часы и доля эфира — из нашей базы,
+   в инвентаре их нет вовсе. Раньше экран показывал только забранное самой
+   «Вахтой» — у Ксена это ноль записей при 137 наградах на аккаунте.
+
+   Награды — плоским списком, без группировки по играм: Twitch не говорит,
+   к какой игре относится награда, `game` у всех до единой пустой. Игра
+   подставляется только там, где награда сошлась с известной кампанией
+   по id benefit'а. Таблица игр осталась плоской, как в макете: строка
+   отвечает «сколько», а «что именно забрано» уходит в правую колонку. */
+let invData = null;
+let invPick = null;   // game_id раскрытой игры
+let invSaved = "";    // что сказать про последний экспорт: сноска переживает перерисовку
+
+async function renderInventory() {
+  invData = await get("/api/inventory");
+  invPick = null;
+  invSaved = "";
+  // Открытый экран — это и есть «увидел»: снимаем отметку сразу, но уже после
+  // того, как забрали данные, иначе новое исчезло бы, не показавшись
+  if (invData.totals.new) {
+    fetch("/api/inventory/seen", { method: "POST" }).then(() => {
+      const t = $("tallyInv");
+      t.hidden = true;
+    });
+  }
+  $("screenAside").textContent = "что уже получено и сколько это стоило эфира";
+  screenActions(`<button class="btn sm" id="invExport">Экспорт в CSV</button>
+    ${lastShell.server_mode ? "" : '<button class="btn sm" id="invFolder">Открыть папку data</button>'}`);
+  $("invExport").onclick = exportInventory;
+  if ($("invFolder")) $("invFolder").onclick = () => fetch("/api/data/open", { method: "POST" });
+  paintInventory();
+}
+
+function paintInventory() {
+  const t = invData.totals;
+  const rewards = invData.rewards || [];
+  // порядок — по эфиру: полоса «доля эфира» иначе читалась бы вразнобой
+  const games = [...invData.games].sort((a, b) => b.minutes - a.minutes);
+  const top = Math.max(1, ...games.map(g => g.minutes));
+  /* Подсказки для поля «игра»: всё, что «Вахта» и так знает про этот аккаунт.
+     Списка игр Twitch тут нет намеренно — награда почти всегда из той игры,
+     которая уже где-то в инвентаре засветилась. */
+  const known = [...new Set([...games.map(g => g.name),
+                             ...rewards.map(r => r.game).filter(Boolean)])].sort();
+
+  $("invBody").innerHTML = `
+    <div class="summary four">
+      <div class="cell"><b>${t.rewards}</b><small>наград на аккаунте</small></div>
+      <div class="cell"><b>${hours(t.minutes)}</b><small>эфира отфармлено</small></div>
+      <div class="cell"><b>${t.games}</b><small>${plural(t.games, "игра", "игры", "игр")}</small></div>
+      <div class="cell"><b>${hours(t.minutes_week)}</b><small>за последние 7 дней</small></div>
+    </div>
+
+    ${rewards.length ? `<div class="sect"><div class="label">награды с twitch${
+        t.new ? `<span class="state ok"><i class="dot"></i>${t.new} ${
+          plural(t.new, "новая", "новые", "новых")}</span>` : ""}</div>
+      <span class="s">всё, что аккаунт получил за всё время — и до «Вахты» тоже.
+        Игру Twitch у наград не отдаёт: она появляется там, где награда сошлась
+        с кампанией, которую «Вахта» видела. Остальное можно вписать руками —
+        обходы такую пометку не сотрут</span></div>
+      <div class="grid rew">
+      <div class="gh"><span>награда</span><span>игра</span><span>получена</span><span>всего</span></div>
+      <datalist id="invGames">${known.map(n => `<option value="${esc(n)}">`).join("")}</datalist>
+      ${rewards.map(r => `<div class="gr${r.new ? " fresh" : ""}">
+        <div class="camp">${art("xs", r.name, r.image, r.id)}
+          <span class="t">${esc(r.name)}</span>${
+            r.new ? `<span class="mark">новое</span>` : ""}</div>
+        <input class="pub${r.game ? "" : " none"}${r.by_hand ? " hand" : ""}"
+          list="invGames" data-reward="${esc(r.id)}" value="${esc(r.game)}"
+          placeholder="—" autocomplete="off" spellcheck="false"
+          title="${r.by_hand ? "вписано руками — сотри, чтобы вернуть автоматику"
+                             : "Twitch игру не отдаёт — впиши, если помнишь"}">
+        <span class="dl">${
+          // с годом: в инвентаре лежат награды за все годы, и «12.03» без него
+          // читается как «в этом марте». Дата есть у всех 137 наград Ксена,
+          // но обещать её Twitch не обязан — отсюда прочерк
+          r.at ? new Date(r.at).toLocaleDateString("ru-RU") : "—"}</span>
+        <span class="dl">${r.count > 1 ? "×" + r.count : "1"}</span></div>`).join("")}</div>`
+      : `<div class="nothing"><div class="void">
+          <h2>Пока пусто</h2>
+          <p>Здесь появится всё, что выдал Twitch: награды приходят в инвентарь
+             аккаунта, а не в «Вахту», — поэтому список честный даже за то время,
+             когда «Вахты» ещё не было.</p>
+          <div class="hint">фарм работает и с пустым инвентарём</div></div></div>`}
+
+    ${games.length ? `<div class="sect"><div class="label">сколько это стоило</div>
+      <span class="s">часов эфира и доли времени в инвентаре Twitch нет — это наше</span></div>
+      <div class="grid inv">
+      <div class="gh"><span>игра</span><span>доля эфира</span><span>часы</span><span>дропы</span></div>
+      ${games.map(g => `<div class="gr ${g.game_id === invPick ? "on" : ""}"
+        data-game="${esc(g.game_id)}" role="button" tabindex="0">
+        <div class="camp">${art("xs", g.name, g.box_art, g.game_id)}
+          <span class="t">${esc(g.name)}</span></div>
+        <div class="share"><div class="bar2"><i style="width:${
+          Math.max(2, Math.round(g.minutes / top * 100))}%"></i></div></div>
+        <span class="dl">${hours(g.minutes)}</span>
+        <span class="dl">${g.drops}</span></div>`).join("")}</div>` : ""}
+
+    <div class="foot-note${invData.stale ? " warn" : ""}" id="invFoot">${invSaved
+      || (invData.stale
+        ? `twitch не ответил — показываю свою копию из data/vahta.db${
+            invData.at ? ", последний раз обновлена " + hhmm(invData.at) : ""}`
+        : `своя копия инвентаря${invData.at ? " · обновлена " + hhmm(invData.at) : ""} ·
+           часы и доля эфира — только наши`)}</div>`;
+
+  $("rail").innerHTML = invPick ? invRail(games.find(g => g.game_id === invPick)) : "";
+
+  $("invBody").querySelectorAll("[data-game]").forEach(row => {
+    const pick = () => {
+      invPick = invPick === row.dataset.game ? null : row.dataset.game;
+      paintInventory();
+    };
+    row.onclick = pick;
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } };
+  });
+
+  /* Игра, вписанная руками. Автоматика знает её только у наград из кампаний,
+     которые «Вахта» видела, — у Ксена это 20 из 137. Остальное помнит человек,
+     и его пометка сильнее нашей подстановки. */
+  $("invBody").querySelectorAll("[data-reward]").forEach(field => {
+    const was = field.value;
+    field.onfocus = () => field.select();
+    field.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); field.blur(); }
+      if (e.key === "Escape") { field.value = was; field.blur(); }
+    };
+    field.onblur = async () => {
+      if (field.value.trim() === was.trim()) return;
+      const answer = await (await fetch(
+        `/api/inventory/${encodeURIComponent(field.dataset.reward)}/game`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ game: field.value.trim() }) })).json();
+      if (!answer.ok) { field.value = was; return; }
+      // стёртая пометка возвращает подстановку — какую именно, знает служба
+      const row = invData.rewards.find(r => r.id === field.dataset.reward);
+      if (row) { row.game = answer.game; row.by_hand = answer.by_hand; }
+      paintInventory();
+      $("invFoot").textContent = answer.by_hand
+        ? "Игра вписана. Обходы её не сотрут — сотри поле, чтобы вернуть автоматику"
+        : "Пометка снята — игра снова подставляется по кампаниям";
+    };
+  });
+}
+
+function invRail(g) {
+  if (!g) return "";
+  return `<div class="rail-in"><div class="box">
+    <div class="label">${esc(g.name)}</div>
+    <p>${g.drops} ${plural(g.drops, "дроп", "дропа", "дропов")} за ${hours(g.minutes)} эфира,
+       ${g.campaigns} ${plural(g.campaigns, "кампания", "кампании", "кампаний")}.</p>
+    <div style="margin-top:12px">${g.claims.map(c => `<div class="taken">
+      <span class="grow">${esc(c.name)} · ${esc(c.campaign)}</span>
+      <span class="at">${clock(c.at)}</span></div>`).join("")
+      || `<div class="taken"><span class="grow">часы есть, дропов пока нет</span></div>`}
+    </div>
+    <p>Здесь только то, что забрала сама «Вахта»: когда именно и какой ценой.
+       Что у тебя есть — в списке наград слева.</p></div></div>`;
+}
+
+async function exportInventory() {
+  const b = $("invExport");
+  b.textContent = "Сохраняю…";
+  try {
+    const data = await saveInventory();
+    invSaved = lastShell.server_mode ? `скачано · ${data.name}` : `сохранено · data/${data.name} · ${data.rows} ${
+      plural(data.rows, "строка", "строки", "строк")}`;
+  } catch {
+    invSaved = "не вышло сохранить файл — папка data занята или закрыта на запись";
+  }
+  b.textContent = "Экспорт в CSV";
+  $("invFoot").textContent = invSaved;
+}
+
+async function saveInventory() {
+  const r = await fetch('/api/inventory/export', {method: 'POST'});
+  if (!r.ok) throw new Error('Не удалось выгрузить инвентарь');
+  if (!lastShell.server_mode) return r.json();
+  const blob = await r.blob();
+  const name = /filename="?([^";]+)"?/.exec(r.headers.get('Content-Disposition') || '')?.[1] || 'inventory.csv';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return {name, rows: invData?.rewards?.length || 0};
+}
+
+/* ---------- Каталог ----------
+   Одна таблица на все фильтры: привязка — это колонка, а не отдельный режим
+   с группировкой по играм. Так в макете, и так честнее — «без привязки»
+   отвечает на вопрос «что открыть на сайте издателя», а не «какие игры
+   сломаны». Поиск и фильтры лежат в шапке экрана. */
+let catFilter = "linkable";
+let catQuery = "";
+let catRows = null;   // кампании каталога плюс игры из списка без кампаний
+let catAt = "";       // когда был последний обход каталога
+
+const SOON = 48 * 60;  // мин: кампания кончается меньше чем через двое суток
+
+async function renderCatalog() {
+  const [data, watch] = await Promise.all([get("/api/campaigns"), get("/api/watchlist")]);
+  const rows = data.campaigns.map(c => ({ ...c }));
+  // Игра из списка, по которой сейчас нет ни одной кампании. Без такой строки
+  // фильтр «в списке» терял бы её молча, а это читается как «не заметил».
+  // Привязка у неё неизвестна: она приходит с кампанией, а кампании нет.
+  const seen = new Set(rows.map(c => c.game_id));
+  for (const g of watch) {
+    if (seen.has(g.game_id)) continue;
+    rows.push({ game_id: g.game_id, game: g.name, box_art: g.box_art, name: "",
+                publisher: "", ends_at: "", linked: null, watched: true });
+  }
+  rows.sort((a, b) => a.game.localeCompare(b.game, "ru") || a.name.localeCompare(b.name, "ru"));
+  catRows = rows;
+  catAt = data.at || "";
+
+  const counts = {
+    linkable: rows.filter(c => c.linked).length,
+    unlinked: rows.filter(c => c.linked === false).length,
+    watched: rows.filter(c => c.watched).length,
+    all: rows.length,
+  };
+  const chip = (key, text) => `<button class="btn sm${catFilter === key ? " on" : ""}"
+    data-filter="${key}">${text} <span style="color:var(--faint)">${counts[key]}</span></button>`;
+
+  screenActions(`<div class="search">
+      <input id="catSearch" placeholder="Поиск по игре, кампании или издателю"
+        autocomplete="off" value="${esc(catQuery)}">
+      <button class="clear" id="catClear"${catQuery ? "" : " hidden"}>× очистить</button></div>
+    ${chip("linkable", "Доступны мне")}${chip("unlinked", "Без привязки")}${
+      chip("watched", "В списке")}${chip("all", "Все")}`);
+  $("screenActions").classList.add("wide");
+  $("headGap").hidden = true;
+
+  const chips = $("screenActions").querySelectorAll("[data-filter]");
+  chips.forEach(b => b.onclick = () => {
+    catFilter = b.dataset.filter;
+    chips.forEach(x => x.classList.toggle("on", x === b));
+    paintCatalog();
+  });
+  const search = $("catSearch");
+  search.oninput = () => {
+    catQuery = search.value;
+    $("catClear").hidden = !catQuery;
+    paintCatalog();
+  };
+  $("catClear").onclick = () => {
+    catQuery = search.value = "";
+    $("catClear").hidden = true;
+    search.focus();
+    paintCatalog();
+  };
+
+  paintCatalog();
+}
+
+/* Перерисовка без запроса: и фильтр, и поиск идут по уже полученным строкам.
+   Трогает только таблицу — поле поиска живёт в шапке и фокус не теряет. */
+function paintCatalog() {
+  if (!catRows) return;
+  const q = catQuery.trim().toLowerCase();
+  const shown = catRows.filter(c =>
+    (catFilter === "all" || (catFilter === "linkable" ? c.linked
+      : catFilter === "unlinked" ? c.linked === false : c.watched))
+    && (!q || `${c.game} ${c.name} ${c.publisher}`.toLowerCase().includes(q)));
+
+  const note = catFilter === "linkable"
+    ? `«Доступны мне» — кампании, где игровой аккаунт уже привязан к этому Twitch:
+       только они реально фармятся.`
+    : catFilter === "unlinked"
+    ? `«Без привязки» — то, что открывается за пять минут на сайте издателя. Пока
+       аккаунт не привязан, Twitch не засчитывает просмотр вообще: счётчик стоит на нуле.`
+    : "";
+
+  $("catBody").innerHTML = shown.length ? `
+    <div class="grid cat">
+      <div class="gh"><span>игра / кампания</span><span>издатель</span><span>до</span>
+        <span>привязка</span><span></span></div>
+      ${shown.map(catRow).join("")}</div>
+    ${note ? `<div class="note-under">${note}</div>` : ""}
+    <div class="foot-note">показано ${shown.length} из ${catRows.length}${
+      catAt ? ` · последний обход ${hhmm(catAt)}` : ""}</div>`
+    : catEmpty(catQuery.trim());
+
+  wireCatalog();
+}
+
+function catRow(c) {
+  const ends = c.ends_at ? dmy(c.ends_at) : "—";
+  const soon = c.ends_at && (+new Date(c.ends_at) - Date.now()) / 60000 < SOON;
+  const link = c.link_url || c.details_url;
+  const bind = c.linked === null ? `<span class="state">—</span>`
+    : c.linked ? `<span class="state ok">привязан</span>`
+    : `<span class="state warn">нет · <a class="ln" href="${esc(link)}" target="_blank"
+         rel="noopener">ссылка →</a></span>`;
+  const sub = !c.name ? `<span class="s">активных кампаний нет</span>`
+    : c.linked === false
+    ? `<span class="s warn">${esc(c.name)} · без привязки прогресс не пойдёт</span>`
+    : `<span class="s">${esc(c.name)}</span>`;
+  return `<div class="gr">
+    <div class="camp">${art("xs", c.game, c.box_art, c.game_id)}
+      <div style="min-width:0"><div class="t">${esc(c.game)}</div>${sub}</div></div>
+    <span class="pub">${esc(c.publisher)}</span>
+    <span class="dl${soon ? " soon" : ""}">${ends}</span>
+    ${bind}
+    ${c.watched ? `<span class="state on">в списке</span>`
+      : `<button class="state" data-watch="${esc(c.game)}">следить</button>`}</div>`;
+}
+
+function catEmpty(q) {
+  const linkable = catRows.filter(c => c.linked).length;
+  return `<div class="nothing"><div class="void">
+    <h2>Ничего не нашёл</h2>
+    <p>${q
+      ? `По запросу «${esc(q)}» активных кампаний нет — ни среди ${linkable} доступных,
+         ни среди ${catRows.length} всех. Возможно, кампания уже закончилась или ещё
+         не открылась.`
+      : `В этом фильтре пусто. Каталог знает ${catRows.length}
+         ${plural(catRows.length, "кампанию", "кампании", "кампаний")}, из них
+         ${linkable} с привязанным аккаунтом.`}</p>
+    <div class="acts">
+      ${q ? `<button class="btn primary" data-watch="${esc(q)}">Добавить в мои игры и ждать</button>` : ""}
+      <button class="btn" id="catReset">Сбросить фильтры</button></div>
+    <div class="hint">игру можно добавить заранее — обход сам заметит,
+      когда по ней откроется кампания</div></div></div>`;
+}
+
+function wireCatalog() {
+  const reset = $("catReset");
+  if (reset) reset.onclick = () => {
+    catFilter = "all";
+    catQuery = "";
+    renderCatalog();
+  };
+  $("catBody").querySelectorAll("[data-watch]").forEach(b => b.onclick = async () => {
+    const was = b.textContent;
+    b.textContent = "добавляю…";
+    const r = await fetch("/api/watchlist", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game: b.dataset.watch }) });
+    if (r.ok) { renderCatalog(); return; }
+    const data = await r.json().catch(() => ({}));
+    b.textContent = was;
+    alert(data.error || "Не вышло");
+  });
+}
+
+/* ---------- Настройки ----------
+   Один экран, шесть панелей: слева то, что связывает с чужими сервисами,
+   справа — что настраивается внутри, риск и данные во всю ширину. Всё
+   состояние приходит четырьмя запросами разом и рисуется один раз: раньше
+   карточки дописывали себя по очереди, и каждая правка требовала помнить,
+   кто чей `insertAdjacentHTML` испортит. */
+let setCode = null;      // последний код входа: нужен, чтобы показать истёкший
+let setNote = "";        // что сказать про экспорт — переживает перерисовку
+
+async function renderSettings() {
+  const [tw, app, tg] = await Promise.all([
+    get("/api/twitch"), get("/api/settings"), get("/api/telegram"),
+  ]);
+  if (tw.pending) setCode = tw.pending;
+
+  $("screenAside").textContent = app.server_mode ? "служба работает на сервере" : "всё лежит на этом компьютере, в папке data";
+  $("setBody").innerHTML = `<div class="set">
+    <div class="col">${twitchPanel(tw)}${telegramPanel(tg)}${notifyPanel(app)}</div>
+    <div class="col">${windowPanel(app)}${farmPanel(app)}</div></div>
+    <div class="pnl warn"><div class="label">риск, который надо назвать</div>
+      <p>Автоматизация просмотра формально противоречит условиям Twitch. Гарантий,
+         что аккаунт не заблокируют, нет ни у одной такой программы — держи ферму
+         на отдельном аккаунте. Twitch меняет внутренние интерфейсы, и программа
+         временами ломается — следи за релизами на GitHub.</p></div>
+    <div class="pnl"><div class="line">
+      <div class="grow"><div class="label">данные</div>
+        <p>Токен, история и статистика эфира лежат ${app.server_mode ? "на сервере, в папке" : "в папке"}
+           <span class="num">data</span> и никуда не отправляются.</p></div>
+      ${app.server_mode ? '<button class="btn" id="serverLogout">Выйти из панели</button>' : '<button class="btn" id="setFolder">Открыть папку</button>'}
+      <button class="btn" id="setExport">Экспорт инвентаря</button></div>
+      <div class="foot-note" id="setFoot">${setNote}</div></div>
+    ${updatePanel(app, lastShell)}`;
+
+  wireSettings();
+}
+
+function twitchPanel(tw) {
+  const on = !!tw.login;
+  const state = on ? `<span class="state ok"><i class="dot"></i>подключён</span>`
+    : tw.pending ? `<span class="state warn"><i class="dot"></i>ждёт кода</span>`
+    : tw.error ? `<span class="state bad"><i class="dot"></i>код не подтверждён</span>`
+    : `<span class="state"><i class="dot"></i>не подключён</span>`;
+
+  let body;
+  if (on) {
+    body = `<div class="line"><span class="avatar">${esc(initials(tw.login))}</span>
+        <div class="grow"><h3>${esc(tw.login)}</h3>
+          <div class="sub">id ${esc(tw.user_id)} · вход по коду, пароль не хранится</div></div>
+        <button class="btn sm" id="twOut">Выйти</button></div>
+      <p>Держи отдельный аккаунт под ферму: если смотреть Twitch тем же аккаунтом
+         параллельно, прогресс дропов рассинхронится.</p>`;
+  } else if (tw.pending) {
+    body = `<p>Открой <a class="lnk" href="${esc(tw.pending.verification_uri)}"
+        target="_blank" rel="noopener">${esc(tw.pending.verification_uri)}</a> и введи код.
+        Пароль здесь не вводится и не хранится.</p>
+      <div class="codebox"><b>${esc(tw.pending.user_code)}</b>
+        <div class="s">код живёт до ${hhmm(tw.pending.expires_at)} · жду подтверждения,
+          экран обновится сам</div></div>`;
+  } else if (tw.error) {
+    // экран из login-error.png, но внутри карточки: отдельное окно — это вторая
+    // поверхность со своим хозяйством, а сказать тут нужно ровно то же самое
+    body = `<h3>${/истёк/i.test(tw.error) ? "Время на ввод кода вышло" : "Вход не прошёл"}</h3>
+      <p>${/истёк/i.test(tw.error)
+        ? `Код живёт десять минут. Похоже, страница Twitch не была открыта или
+           подтверждение не дошло — программа ничего не сохранила, пароль она
+           и не спрашивает.`
+        : esc(tw.error)}</p>
+      ${setCode ? `<div class="codebox dead"><b>${esc(setCode.user_code)}</b>
+        <div class="s">истёк ${hhmm(setCode.expires_at)} ·
+          ${esc(setCode.verification_uri.replace(/^https?:\/\//, ""))}</div></div>` : ""}
+      <div class="label" style="margin-top:18px">что проверить</div>
+      <ol class="steps">
+        <li>Открыта ли страница twitch.tv/activate в браузере</li>
+        <li>Тот ли аккаунт, который ты держишь под ферму</li>
+        <li>Не блокирует ли соединение VPN или файрвол</li></ol>
+      <div class="acts"><button class="btn primary" id="twIn">Получить новый код</button></div>`;
+  } else {
+    body = `<p>Без входа фарм не работает. Twitch выдаст короткий код, его нужно ввести
+        на его же сайте — пароль здесь не вводится и не хранится.</p>
+      <div class="acts"><button class="btn primary" id="twIn">Войти в Twitch</button></div>`;
+  }
+  return `<div class="pnl"><div class="label">аккаунт twitch ${state}</div>${body}</div>`;
+}
+
+function telegramPanel(tg) {
+  const state = !tg.configured ? `<span class="state">не настроен</span>`
+    : !tg.running ? `<span class="state warn"><i class="dot"></i>токен есть, бот не поднят</span>`
+    : !tg.owner ? `<span class="state warn"><i class="dot"></i>ждёт /start</span>`
+    : `<span class="state ok"><i class="dot"></i>на связи</span>`;
+  const body = tg.configured
+    ? `<div class="line"><div class="grow">
+         <h3>Токен сохранён <span class="num">${esc(tg.hint)}</span></h3>
+         <div class="sub">${tg.username ? "@" + esc(tg.username) + " · " : ""}${
+           tg.owner ? "владелец назначен" : "напиши боту /start"}</div></div>
+       <button class="btn sm" id="tgForget">Забыть</button></div>`
+    : `<div class="field">
+         <input id="tgToken" type="password" autocomplete="off" placeholder="1234567890:AA…">
+         <button class="btn" id="tgSave">Сохранить</button></div>`;
+  return `<div class="pnl"><div class="label">telegram ${state}</div>${body}
+    <p id="tgNote">Бот свой, чужой сервер в переписке не участвует: токен берётся
+      у <a class="lnk" href="https://t.me/BotFather" target="_blank"
+      rel="noopener">@BotFather</a>. Первый, кто напишет <b>/start</b>, становится
+      владельцем — остальные чаты игнорируются.</p></div>`;
+}
+
+function windowPanel(s) {
+  if (s.server_mode) return `<div class="pnl"><div class="label">тема и служба</div>
+    <div class="chips" id="themePick">${[["system", "Как в системе"], ["dark", "Тёмная"], ["light", "Светлая"]].map(
+    ([id, name]) => `<button class="btn sm${s.theme === id ? " on" : ""}" data-theme="${id}">${name}</button>`).join("")}</div>
+    <p>ВАХТА работает на сервере и запускается вместе с ним. Можно закрыть браузер и выключить компьютер — фарм продолжится.</p></div>`;
+  return `<div class="pnl"><div class="label">окно и тема</div>
+    <div class="chips" id="themePick">
+      ${[["system", "Как в системе"], ["dark", "Тёмная"], ["light", "Светлая"]].map(
+        ([id, name]) => `<button class="btn sm${s.theme === id ? " on" : ""}"
+          data-theme="${id}">${name}</button>`).join("")}</div>
+    <div class="line" style="margin-top:18px">${sw("closeTray", s.close_to_tray,
+      "Закрытие окна сворачивает в трей", s.close_to_tray
+        ? "Фарм продолжается, выход — через меню иконки"
+        : "Крестик закрывает «Вахту» целиком, фарм останавливается")}</div>
+    <div class="line">${sw("autoRun", s.autostart, "Запускать вместе с Windows",
+      "Ярлык в реестре пользователя, без прав администратора")}</div>
+    ${s.autostart ? `<div class="line">${sw("winAuto", s.window_on_autostart,
+      "И открывать окно", "Иначе при входе в систему «Вахта» уходит в трей молча")}</div>` : ""}
+    <p>Закрытое окно освобождает около 460 МБ — поэтому крестик его уничтожает,
+      а не прячет. Службы и фарма это не касается.</p></div>`;
+}
+
+function updatePanel(s, shell) {
+  if (s.server_mode) return `<div class="pnl"><div class="label">обновления</div>
+    <p>Серверная ВАХТА обновляется пересборкой Docker-образа. Вход в Twitch, список игр и история сохраняются отдельно от приложения.</p></div>`;
+  const waiting = shell.update_ready;
+  const state = !s.auto_update ? `<span class="state">только плашка</span>`
+    : waiting ? `<span class="state warn"><i class="dot"></i>ждёт паузы в фарме</span>`
+    : `<span class="state ok"><i class="dot"></i>ставятся сами</span>`;
+  return `<div class="pnl"><div class="label">обновления ${state}</div>
+    <div class="line">${sw("updAuto", s.auto_update, "Ставить обновления самой",
+      waiting ? `Версия ${shell.update} скачана — встанет между ломтями фарма`
+              : "Тихо, без вопросов и без перезагрузки")}
+      ${waiting ? `<button class="btn sm primary" id="updNow">Поставить сейчас</button>`
+                : `<button class="btn sm" id="updCheck">Проверить</button>`}</div>
+    <p id="updNote">${updSaid || `«Вахта» смотрит релизы на GitHub раз в шесть часов. Файл качается
+      заранее и сверяется по хэшу, а ставится не сразу: посреди просмотра обновление
+      стоило бы минут, которые Twitch не вернёт, — поэтому момент выбирается между
+      ломтями фарма. Данные и вход в Twitch обновление не трогает.
+      Выключишь — останется плашка в статусной строке, как раньше.`}</p></div>`;
+}
+
+/* Что ответила последняя проверка обновлений. Живёт снаружи панели, потому что
+   панель перерисовывается после ответа — иначе ответ стирал бы сам себя. */
+let updSaid = "";
+
+const sw = (id, checked, title, sub) => `<label class="sw grow">
+  <input type="checkbox" id="${id}"${checked ? " checked" : ""}><i></i>
+  <span><div>${title}</div><div class="s">${sub}</div></span></label>`;
+
+function wireSettings() {
+  const save = async (patch) => {
+    await fetch("/api/settings", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    renderSettings();
+  };
+  const on = (id, go) => { const el = $(id); if (el) el.onclick = go; };
+
+  if ($("ntfOn")) $("ntfOn").onchange = (e) => save({ notifications: e.target.checked });
+  if ($("closeTray")) $("closeTray").onchange = (e) => save({ close_to_tray: e.target.checked });
+  // порядок фарма меняется сразу, не дожидаясь получаса до пересборки плана
+  $("farmLoose").onchange = async (e) => {
+    await save({ farm_unlinked: e.target.checked });
+    fetch("/api/replan", { method: "POST" });
+  };
+  if ($("updAuto")) $("updAuto").onchange = (e) => save({ auto_update: e.target.checked });
+
+  /* Проверка руками. Обычно релизы смотрит фоновый круг раз в шесть часов,
+     но ждать его, когда обновление вышло только что, незачем. Кнопка заодно и качает:
+     ставить всё равно на границе ломтя, а качать в этот момент — значит его
+     пропустить. Ответ может идти секунды (двадцать мегабайт), поэтому кнопка
+     сразу говорит, что занята. */
+  on("updCheck", async () => {
+    const btn = $("updCheck");
+    btn.textContent = "Проверяю…";
+    btn.disabled = true;
+    try {
+      const r = await (await fetch("/api/update/check", { method: "POST" })).json();
+      updSaid = esc(r.message);
+    } catch (e) {
+      updSaid = "Проверить не вышло — служба не ответила";
+    }
+    await renderSettings();
+    tick();  // плашка в статусной строке знает про новую версию сразу
+  });
+
+  on("updNow", async () => {
+    const btn = $("updNow");
+    btn.textContent = "Запускаю…";
+    btn.disabled = true;
+    const r = await (await fetch("/api/update/install", { method: "POST" })).json();
+    updSaid = esc(r.message);
+    await renderSettings();
+  });
+  if ($("autoRun")) $("autoRun").onchange = (e) => save({ autostart: e.target.checked });
+  on("serverLogout", async () => { await fetch('/auth/logout', {method: 'POST'}); location.replace('/auth/login'); });
+  const winAuto = $("winAuto");
+  if (winAuto) winAuto.onchange = (e) => save({ window_on_autostart: e.target.checked });
+
+  $("themePick").querySelectorAll("button").forEach(b => b.onclick = () => {
+    applyTheme(b.dataset.theme);  // не ждём службу: тема должна отзываться сразу
+    save({ theme: b.dataset.theme });
+  });
+
+  on("ntfTest", async () => {
+    const r = await (await fetch("/api/settings/test", { method: "POST" })).json();
+    $("ntfNote").textContent = r.shown
+      ? "Отправлено. Если ничего не появилось — глушит Windows: смотри «Фокусировку внимания» и параметры уведомлений."
+      : "Показывать нечем: «Вахта» запущена без трея.";
+  });
+
+  wireTwitch(renderSettings);
+
+  on("tgSave", async () => {
+    const token = $("tgToken").value.trim();
+    if (!token) return;
+    $("tgSave").textContent = "Проверяю…";
+    const r = await fetch("/api/telegram", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    const data = await r.json();
+    if (r.ok) {
+      await renderSettings();
+      $("tgNote").innerHTML = `Бот <b>@${esc(data.username)}</b> подключён.
+        Теперь напиши ему <b>/start</b>.`;
+    } else { $("tgSave").textContent = "Сохранить"; $("tgNote").textContent = data.error; }
+  });
+  on("tgForget", async () => {
+    await fetch("/api/telegram", { method: "DELETE" });
+    renderSettings();
+  });
+
+  on("setFolder", () => fetch("/api/data/open", { method: "POST" }));
+  on("setExport", async () => {
+    $("setExport").textContent = "Сохраняю…";
+    try {
+      const data = await saveInventory();
+      setNote = lastShell.server_mode ? `скачано · ${data.name}` : `сохранено · data/${data.name} · ${data.rows} ${
+        plural(data.rows, "строка", "строки", "строк")}`;
+    } catch {
+      setNote = "не вышло сохранить файл — папка data занята или закрыта на запись";
+    }
+    $("setExport").textContent = "Экспорт инвентаря";
+    $("setFoot").textContent = setNote;
+  });
+}
+
+/* Кнопки входа. Живут в двух местах — в настройках и в мастере первого
+   запуска, — поэтому обвязка отдельно от них обоих и берёт, куда вернуться. */
+function wireTwitch(after) {
+  const inBtn = $("twIn"), outBtn = $("twOut");
+  if (inBtn) inBtn.onclick = async () => {
+    inBtn.disabled = true;
+    inBtn.textContent = "Запрашиваю код…";
+    try {
+      const response = await fetch("/api/twitch/login", { method: "POST" });
+      if (!response.ok) throw new Error("Сервер не смог запросить код. Обнови страницу и попробуй ещё раз.");
+      await after();
+    } catch (error) {
+      let note = inBtn.parentElement.querySelector(".twitch-login-error");
+      if (!note) {
+        note = document.createElement("p");
+        note.className = "twitch-login-error";
+        note.setAttribute("role", "alert");
+        inBtn.parentElement.appendChild(note);
+      }
+      note.textContent = error.message || "Нет связи с сервером. Попробуй ещё раз.";
+    } finally {
+      inBtn.disabled = false;
+      inBtn.textContent = "Войти в Twitch";
+    }
+  };
+  if (outBtn) outBtn.onclick = async () => {
+    await fetch("/api/twitch/logout", { method: "POST" });
+    setCode = null;
+    after();
+  };
+  // код ждёт подтверждения — переспрашиваем службу сами
+  if (setCode && !outBtn) setPoll(after);
+}
+
+/* Ожидание подтверждения кода: спрашиваем службу, пока она не ответит, что
+   вход прошёл или что код истёк. Один таймер на окно. */
+let loginPoll = null;
+function setPoll(after) {
+  if (loginPoll) return;
+  loginPoll = setInterval(async () => {
+    const tw = await get("/api/twitch").catch(() => null);
+    if (!tw || tw.pending) return;
+    clearInterval(loginPoll);
+    loginPoll = null;
+    after();
+  }, 3000);
+}
+
+/* ---------- мастер первого запуска ----------
+   Четыре шага в том порядке, в каком они друг от друга зависят: без входа
+   не виден каталог, без списка игр нечего привязывать. В макете шаг привязки
+   второй, но там список уже есть — а на пустой «Вахте» его сначала надо
+   составить, иначе шаг показывал бы пустоту.
+
+   Пропустить можно на любом шаге: мастер объясняет, а не сторожит. Ничего
+   своего он не хранит — каждый шаг работает теми же ручками, что и экраны. */
+const WIZ = ["Вход в Twitch", "Игры под фарм", "Привязка аккаунтов", "Как себя вести"];
+let wizStep = 0;
+let wizData = null;
+let wizDone = false;  // сторож от повтора: не сохранилось — не наша беда окна
+
+async function openWizard() {
+  if ($("wiz")) return;
+  const box = document.createElement("div");
+  box.className = "wiz";
+  box.id = "wiz";
+  box.innerHTML = `<div class="wiz-top">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="6" y="7" width="20" height="4" rx="2" opacity=".32"></rect>
+        <rect x="9" y="14" width="14" height="4" rx="2" class="mid"></rect>
+        <rect x="12" y="21" width="8" height="4" rx="2" opacity=".32"></rect></svg>
+      <span class="tb-name">первый запуск</span><span class="spacer"></span>
+      <button class="skip" id="wizSkip">пропустить</button></div>
+    <div class="wiz-body"><div class="wiz-in" id="wizIn"></div></div>
+    <div class="wiz-foot"><span class="hint" id="wizHint"></span>
+      <button class="btn" id="wizBack">Назад</button>
+      <button class="btn primary" id="wizNext">Дальше</button></div>`;
+  document.body.append(box);
+  $("wizSkip").onclick = closeWizard;
+  $("wizBack").onclick = () => { if (wizStep > 0) { wizStep--; paintWiz(); } };
+  $("wizNext").onclick = () => {
+    if (wizStep < WIZ.length - 1) { wizStep++; paintWiz(); } else closeWizard();
+  };
+  await paintWiz();
+}
+
+async function closeWizard() {
+  wizDone = true;
+  await fetch("/api/settings", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ onboarded: true }) });
+  const box = $("wiz");
+  if (box) box.remove();
+  planCache = null;
+  tick();
+}
+
+async function paintWiz() {
+  const [tw, watch, cat] = await Promise.all([
+    get("/api/twitch"), get("/api/watchlist"),
+    // каталог нужен только шагу привязки, и только когда до него дошли:
+    // на первом шаге за ним ещё некому ходить — вход не сделан
+    wizStep === 2 ? get("/api/campaigns").catch(() => ({ campaigns: [], at: "" }))
+                  : Promise.resolve(null),
+  ]);
+  if (tw.pending) setCode = tw.pending;
+  wizData = { tw, watch, cat };
+
+  const app = await get("/api/settings");
+  const body = [wizTwitch, wizGames, wizLink, wizHabits][wizStep](wizData, app);
+  $("wizIn").innerHTML = `
+    <div class="wiz-steps">${WIZ.map((_, i) =>
+      `<i class="${i < wizStep ? "done" : i === wizStep ? "now" : ""}"></i>`).join("")}</div>
+    <div class="stamp">шаг ${wizStep + 1} из ${WIZ.length}</div>
+    ${body.html}`;
+  $("wizHint").textContent = body.hint;
+  $("wizBack").disabled = wizStep === 0;
+  $("wizNext").textContent = wizStep === WIZ.length - 1 ? "Готово" : "Дальше";
+  if (body.wire) body.wire();
+}
+
+function wizTwitch({ tw }) {
+  return {
+    hint: tw.login ? "Дропы падают в игровой аккаунт, привязанный к этому Twitch"
+                   : "Можно пропустить, но без входа фарм не начнётся",
+    html: `<h2>Войди в Twitch</h2>
+      <p>Просмотр засчитывается тому аккаунту, под которым «Вахта» смотрит.
+         Пароль здесь не вводится и не хранится: Twitch выдаёт короткий код,
+         его нужно подтвердить на его же сайте.</p>
+      <div class="set" style="max-width:520px">${twitchPanel(tw)}</div>`,
+    wire: () => wireTwitch(paintWiz),
+  };
+}
+
+/* Игры из инвентаря предлагаются списком, но не добавляются молча: вотчлист —
+   это выбор человека, а не наша догадка. Зато искать в каталоге то, что уже
+   фармится на его же аккаунте, — работа, которую мы можем не отдавать ему.
+
+   Список грузится сам и после шага, а не вместе с ним: спросить Twitch — это
+   секунда-две по сети, и держать ради неё весь шаг пустым нельзя. Пока ответа
+   нет, на месте списка стоит знак «Вахты» со шкалой — тот же, что в трее.
+
+   `wizInv` живёт между перерисовками: шаг рисуется заново на каждое добавление,
+   а инвентарь за это время не меняется. */
+let wizInv = null;   // ответ /api/inventory/games или null, пока не спросили
+
+function wizGames({ watch, tw }) {
+  // «сначала войди» устаревает ровно в тот момент, когда человек вошёл:
+  // на прошлом шаге он это и сделал, и спросить надо заново
+  if (wizInv && wizInv.needs_login && tw.login) wizInv = null;
+  const mine = (wizInv ? wizInv.games : []).filter(g => !g.watched);
+  return {
+    hint: mine.length ? "Это игры, по которым на твоём аккаунте уже идёт прогресс"
+                      : "Список можно менять когда угодно — на вкладке «Мои игры»",
+    html: `<h2>Выбери игры под фарм</h2>
+      <p>«Вахта» следит только за тем, что в списке: смотрит стримы с дропсами,
+         считает эфир и раскладывает кампании по дедлайнам. Игру можно добавить
+         заранее — обход сам заметит, когда по ней откроется кампания.</p>
+      <div id="wizGamesBox">${wizMine(mine)}</div>
+      <div class="label" style="margin-top:22px" id="wizManual">${
+        mine.length ? "или добавь вручную" : "добавить игру"}</div>
+      <div class="field" style="max-width:520px;margin-top:10px">
+        <input id="wizGame" placeholder="Название игры, например Rust" autocomplete="off">
+        <button class="btn${mine.length ? "" : " primary"}" id="wizAdd">Добавить</button></div>
+      <div class="note" id="wizNote" style="margin-top:10px"></div>
+      ${watch.length ? `<div class="grid" style="margin-top:18px">
+        <div class="gh" style="grid-template-columns:1fr 90px">
+          <span>в списке · ${watch.length}</span><span></span></div>
+        ${watch.map(g => `<div class="gr" style="grid-template-columns:1fr 90px">
+          <div class="camp">${art("xs", g.name, g.box_art, g.game_id)}
+            <span class="t">${esc(g.name)}</span></div>
+          <button class="state" data-drop="${esc(g.game_id)}">убрать</button></div>`).join("")}
+        </div>` : ""}`,
+    wire: () => {
+      $("wizAdd").onclick = () => addGame($("wizGame"), $("wizNote"), paintWiz);
+      $("wizGame").onkeydown = (e) => { if (e.key === "Enter") $("wizAdd").click(); };
+      hintGames($("wizGame"));
+      $("wizIn").querySelectorAll("[data-drop]").forEach(b => b.onclick = async () => {
+        await fetch("/api/watchlist/" + b.dataset.drop, { method: "DELETE" });
+        paintWiz();
+      });
+      wireMine(mine);
+      if (!wizInv) loadWizGames();   // первый показ шага: идём спрашивать
+    },
+  };
+}
+
+/* Блок «уже фармится»: ожидание, беда с причиной или список. Отдельно от шага,
+   потому что перерисовывается сам, когда придёт ответ. */
+function wizMine(mine) {
+  if (!wizInv) {
+    return `<div class="wait">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="6" y="7" width="20" height="4" rx="2"></rect>
+        <rect x="9" y="14" width="14" height="4" rx="2" class="mid"></rect>
+        <rect x="12" y="21" width="8" height="4" rx="2"></rect></svg>
+      <span>Смотрю, что уже фармится на твоём аккаунте…</span></div>`;
+  }
+  if (wizInv.needs_login) {
+    return `<div class="note">Свои игры покажу после входа — он на прошлом шаге.
+      Вручную добавить можно и без него.</div>`;
+  }
+  if (wizInv.error) {
+    return `<div class="note">Не вышло спросить Twitch: ${esc(wizInv.error)}.
+      <button class="state" id="wizRetry">попробовать снова</button></div>`;
+  }
+  if (!mine.length) {
+    return `<div class="note">${wizInv.games.length
+      ? "Всё, что фармится на аккаунте, уже в списке."
+      : "На аккаунте пока нет кампаний в процессе — значит и предлагать нечего."}</div>`;
+  }
+  return `<div class="grid">
+    <div class="gh" style="grid-template-columns:1fr 90px">
+      <span>уже фармится на этом аккаунте · ${mine.length}</span>
+      <button class="state" id="wizTakeAll">добавить все</button></div>
+    ${mine.map(g => `<div class="gr" style="grid-template-columns:1fr 90px">
+      <div class="camp">${art("xs", g.name, g.box_art, g.game_id)}
+        <span class="t">${esc(g.name)}</span></div>
+      <button class="state" data-take="${esc(g.game_id)}">добавить</button></div>`).join("")}
+    </div>`;
+}
+
+function wireMine(mine) {
+  const box = $("wizGamesBox");
+  if (!box) return;
+  const retry = $("wizRetry");
+  if (retry) retry.onclick = () => { wizInv = null; paintWiz(); };
+  const take = async (ids, b) => {
+    const was = b.textContent;
+    b.textContent = "добавляю…";
+    const r = await fetch("/api/watchlist/inventory", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ game_ids: ids }) });
+    const data = await r.json().catch(() => ({}));
+    b.textContent = was;
+    if (data.added) wizInv = null;  // добавленные ушли в список — спросим заново
+    paintWiz();
+  };
+  box.querySelectorAll("[data-take]").forEach(b =>
+    b.onclick = () => take([b.dataset.take], b));
+  const all = $("wizTakeAll");
+  if (all) all.onclick = () => take(mine.map(g => g.game_id), all);
+}
+
+async function loadWizGames() {
+  // причину беды называет служба, полем `error`; сюда доходит только то, что
+  // случилось по дороге к ней самой, и пересказывать её ответ целиком незачем
+  const answer = await get("/api/inventory/games")
+    .catch(() => ({ games: [], error: "служба не ответила" }));
+  wizInv = answer;
+  // шаг мог сменитьcя, пока мы ждали Twitch: тогда рисовать нечего
+  if (wizStep === 1 && $("wizGamesBox")) {
+    const mine = answer.games.filter(g => !g.watched);
+    $("wizGamesBox").innerHTML = wizMine(mine);
+    wireMine(mine);
+    $("wizHint").textContent = mine.length
+      ? "Это игры, по которым на твоём аккаунте уже идёт прогресс"
+      : "Список можно менять когда угодно — на вкладке «Мои игры»";
+    // ручной ввод из главного действия становится второстепенным: пришёл
+    // список — добавлять руками уже незачем, но возможность остаётся
+    $("wizManual").textContent = mine.length ? "или добавь вручную" : "добавить игру";
+    $("wizAdd").classList.toggle("primary", !mine.length);
+  }
+}
+
+/* Привязка одна на игру, а не на кампанию: у игры их бывает несколько,
+   и привязанный аккаунт открывает прогресс сразу по всем. */
+function wizLink({ watch, cat }) {
+  const linked = new Map();
+  for (const c of (cat ? cat.campaigns : [])) {
+    const was = linked.get(c.game_id);
+    linked.set(c.game_id, {
+      linked: c.linked || (was && was.linked),
+      url: (was && was.url) || c.link_url || c.details_url,
+    });
+  }
+  const rows = watch.map(g => {
+    const it = linked.get(g.game_id);
+    const tail = !it ? `<span class="state">кампаний нет</span><span></span>`
+      : it.linked ? `<span class="state ok">привязан</span>
+          <span class="dl">${cat.at ? "проверено " + hhmm(cat.at) : ""}</span>`
+      : `<span class="state warn">не привязан</span>
+         <a class="btn sm" href="${esc(it.url)}" target="_blank" rel="noopener"
+            style="text-decoration:none">Открыть сайт</a>`;
+    return `<div class="gr" style="grid-template-columns:1fr 130px 130px">
+      <div class="camp">${art("xs", g.name, g.box_art, g.game_id)}
+        <span class="t">${esc(g.name)}</span></div>${tail}</div>`;
+  }).join("");
+
+  return {
+    hint: "Можно пропустить — но по непривязанным играм прогресс будет ноль",
+    html: `<h2>Привяжи игровые аккаунты</h2>
+      <p>Twitch не начинает засчитывать просмотр, пока игровой аккаунт не привязан —
+         счётчик так и стоит на нуле. Это делается на сайте издателя, один раз
+         на игру.</p>
+      ${watch.length ? `<div class="grid">${rows}</div>
+        <div class="foot-note">привязку видно не сразу — Twitch обновляет её
+          у себя, «Вахта» подхватит на ближайшем обходе</div>`
+        : `<div class="nothing"><div class="void"><h2>Список пуст</h2>
+            <p>Привязывать пока нечего: вернись на шаг назад и добавь игры.</p>
+            </div></div>`}`,
+  };
+}
+
+function wizHabits(_, app) {
+  if (app.server_mode) return {hint: "Можно закрыть браузер — фарм продолжится",
+    html: '<h2>ВАХТА работает на сервере</h2><p>Служба запускается вместе с сервером. Игры, прогресс и настройки доступны из этой панели. Telegram настраивается в разделе «Настройки».</p>', wire: () => {}};
+  return {
+    hint: "Всё это потом меняется в «Настройках»",
+    html: `<h2>Как «Вахте» себя вести</h2>
+      <p>Фарм идёт, пока запущена служба, — окно ему не нужно. Поэтому крестик
+         по умолчанию убирает окно в трей, а не выходит.</p>
+      <div class="set" style="max-width:560px"><div class="col"><div class="pnl">
+        <div class="line">${sw("wizTray", app.close_to_tray,
+          "Закрытие окна сворачивает в трей",
+          "Иначе крестик закрывает «Вахту» целиком и фарм останавливается")}</div>
+        <div class="line">${sw("wizRun", app.autostart, "Запускать вместе с Windows",
+          "Ярлык в реестре пользователя, без прав администратора")}</div>
+        <div class="line">${sw("wizNtf", app.notifications, "Показывать уведомления",
+          "Забранные дропы, открывшиеся кампании, конфликты дедлайнов")}</div>
+      </div></div></div>`,
+    wire: () => {
+      const save = async (patch) => {
+        await fetch("/api/settings", { method: "POST",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      };
+      $("wizTray").onchange = (e) => save({ close_to_tray: e.target.checked });
+      $("wizRun").onchange = (e) => save({ autostart: e.target.checked });
+      $("wizNtf").onchange = (e) => save({ notifications: e.target.checked });
+    },
+  };
+}
+
+/* ---------- тосты ----------
+   Служба копит ленту уведомлений, окно показывает то, чего ещё не видело.
+   Первый опрос ничего не сыплет: иначе открытое окно встречало бы человека
+   стопкой того, что случилось, пока оно было закрыто, — для этого есть
+   центр уведомлений Windows. */
+let seenEvent = null;
+
+function showEvents(events) {
+  if (!events) return;
+  const last = events.length ? events[events.length - 1].id : 0;
+  if (seenEvent === null) { seenEvent = last; return; }
+  for (const e of events) {
+    if (e.id <= seenEvent) continue;
+    seenEvent = e.id;
+    toast(e.title, e.text);
+  }
+}
+
+function toast(title, text) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML = `<div class="label">${esc(title)}</div>
+    <p>${esc(text).replace(/\n/g, "<br>")}</p>`;
+  $("toasts").append(el);
+  setTimeout(() => {
+    el.classList.add("out");
+    setTimeout(() => el.remove(), 220);
+  }, 4000);
+}
+
+/* ---------- своё окно ----------
+   Всё ниже включается, только если под нами своё окно, а не браузер: мост
+   pywebview появляется не сразу, поэтому либо он уже есть, либо ждём события. */
+function framed(api) {
+  document.documentElement.classList.add("framed");
+
+  function showState(on) {
+    document.documentElement.classList.toggle("maxed", on);
+    const btn = $("tbMax");
+    btn.title = on ? "Свернуть в окно" : "Развернуть";
+    btn.setAttribute("aria-label", btn.title);
+    // развёрнутому — два прямоугольника внахлёст, как у Windows
+    $("tbMaxIcon").innerHTML = on
+      ? '<rect x=".5" y="2.5" width="7" height="7" rx="1"></rect>' +
+        '<path d="M2.5 2.5V.5h7v7h-2"></path>'
+      : '<rect x=".5" y=".5" width="9" height="9" rx="1"></rect>';
+  }
+
+  const toggle = () => api.toggle_maximize().then(showState);
+  $("tbMin").onclick = () => api.minimize();
+  $("tbClose").onclick = () => api.close();
+  $("tbMax").onclick = toggle;
+
+  const grab = $("tbGrab");
+  grab.ondblclick = toggle;
+  // перетаскивание развёрнутого окна ничего хорошего не даёт: гасим нажатие
+  // на перехвате, до того как до него доберётся обработчик pywebview
+  grab.addEventListener("mousedown", (e) => {
+    if (document.documentElement.classList.contains("maxed")) e.stopPropagation();
+  }, true);
+
+  // развернуть могут и мимо наших кнопок — Win+↑ или прилипанием к краю,
+  // и тогда единственный сигнал, который до нас доходит, — изменение размера.
+  // Спрашиваем не на каждое событие: пока окно тянут за край, их сотни, а
+  // каждый вопрос — это ходка в Python и обратно
+  let asking = 0;
+  addEventListener("resize", () => {
+    clearTimeout(asking);
+    asking = setTimeout(() => api.is_maximized().then(showState), 120);
+  });
+  api.is_maximized().then(showState);
+
+  // Верхние 8 px окна рисует не эта страница, а сама Windows: там рамка,
+  // за которую окно тянут. Убрать её нельзя, но можно покрасить в цвет
+  // титульной строки — тогда полоса перестаёт читаться как полоса.
+  // Цвет отсюда, а не из Python: тема живёт в CSS, и второй список значений
+  // однажды разошёлся бы с первым.
+  onThemeChanged = function paintFrame() {
+    const bar = document.querySelector(".titlebar");
+    const rgb = (v) => (v.match(/\d+/g) || [0, 0, 0]).slice(0, 3).map(Number);
+    const style = getComputedStyle(bar);
+    api.set_frame_colors(rgb(style.backgroundColor), rgb(style.borderBottomColor));
+  };
+  onThemeChanged();
+
+  // контекстное меню WebView2 — это «обновить» и «сохранить как»: в окне
+  // программы им делать нечего. В полях ввода оно остаётся, там оно по делу
+  addEventListener("contextmenu", (e) => {
+    if (!e.target.closest("input, textarea, .code, .sel")) e.preventDefault();
+  });
+}
+if (window.pywebview?.api) framed(window.pywebview.api);
+else addEventListener("pywebviewready", () => framed(window.pywebview.api));
+
+/* ---------- оболочка ---------- */
+const tabs = document.querySelectorAll(".nav-item");
+const panes = { now:"p-now", sched:"p-sched", games:"p-games", cat:"p-cat",
+                inv:"p-inv", set:"p-set" };
+tabs.forEach(t => t.onclick = () => {
+  tabs.forEach(x => x.setAttribute("aria-selected", String(x === t)));
+  Object.entries(panes).forEach(([k, id]) => $(id).classList.toggle("on", k === t.dataset.p));
+  // шапку и правую колонку наполняет экран, а не оболочка: уходя, убираем за собой
+  $("head").hidden = false;
+  $("screenName").textContent = t.querySelector(".grow").textContent;
+  $("screenStamp").textContent = "";
+  $("screenAside").textContent = "";
+  $("rail").innerHTML = "";
+  $("screenActions").className = "chips";  // «Каталог» уходит с широкой шапкой
+  $("headGap").hidden = false;
+  if (t.dataset.p === "now") { tick(); return; }
+  screenActions(`<button class="btn sm" id="refresh">Пересчитать</button>`);
+  wireRefresh();
+  if (t.dataset.p === "games") renderGames();
+  if (t.dataset.p === "cat") renderCatalog();
+  if (t.dataset.p === "inv") renderInventory();
+  if (t.dataset.p === "set") renderSettings();
+});
+
+/* Тему выбирает человек, а хранит служба — значение приходит вместе с
+   остальной оболочкой. «Как в системе» разрешается здесь: CSS знает только
+   про dark и light, и это нарочно (см. комментарий к токенам). */
+const systemDark = matchMedia("(prefers-color-scheme: dark)");
+let themeChoice = "system";
+let onThemeChanged = () => {};  // своё окно подставит сюда покраску рамки
+
+function applyTheme(choice) {
+  choice = choice || "system";
+  const want = (choice === "system" ? systemDark.matches : choice === "dark")
+    ? "dark" : "light";
+  if (choice === themeChoice && want === document.documentElement.dataset.theme) return;
+  themeChoice = choice;
+  document.documentElement.dataset.theme = want;
+  onThemeChanged();
+}
+systemDark.addEventListener("change", () => {
+  document.documentElement.dataset.theme = "";  // чтобы applyTheme увидел разницу
+  applyTheme(themeChoice);
+});
+// до первого ответа службы идём за системой: без этого светлая Windows
+// смотрела бы на тёмное окно, а в браузерном запасном пути — всегда
+applyTheme("system");
+
+/* Часы смены идут сами, между опросами: служба присылает не строку «03:40»,
+   а сколько секунд смена длится, — иначе цифра стояла бы по двадцать секунд. */
+let shiftFrom = null;
+
+function drawShift() {
+  const live = shiftFrom !== null;
+  $("shiftLabel").textContent = live ? "вахта идёт" : "вахта стоит";
+  $("shiftNote").textContent = live ? "без обрывов" : "эфира нет";
+  if (!live) { $("shiftClock").textContent = "00:00:00"; return; }
+  const total = Math.max(0, Math.floor((Date.now() - shiftFrom) / 1000));
+  const pad = (n) => String(n).padStart(2, "0");
+  // Часы, минуты и секунды всегда, даже когда часов нет: «03:40» читалось
+  // и как три часа сорок минут, и как три минуты сорок секунд, а по одной
+  // цифре не угадать — раньше разряды переключались на часе работы
+  $("shiftClock").textContent = `${pad(Math.floor(total / 3600))}:${
+    pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
+}
+
+function tally(id, value, text) {
+  const el = $(id);
+  el.hidden = !value;
+  el.textContent = value ? (text ?? value) : "";
+}
+
+/* Последняя оболочка с опроса: «Настройки» рисуются по своему запросу, а знать
+   про скачанное обновление им надо. Пусто до первого опроса — и это ничего
+   не ломает: панель просто покажет переключатель без подробностей. */
+let lastShell = {};
+
+function renderShell(live, shell) {
+  lastShell = shell;
+  document.documentElement.classList.toggle('server', !!shell.server_mode);
+  $("navLive").hidden = !live.farming;
+  tally("tallySched", shell.counts.sched);
+  tally("tallyGames", shell.counts.games);
+  tally("tallyCat", shell.counts.cat);
+  // «+3», а не «3»: в остальных пунктах цифра — это сколько там всего,
+  // а здесь — сколько прибавилось с прошлого раза
+  tally("tallyInv", shell.counts.inv, "+" + shell.counts.inv);
+  $("tallyInv").classList.add("new");
+
+  shiftFrom = shell.shift === null ? null : Date.now() - shell.shift * 1000;
+  drawShift();
+
+  $("who").hidden = !shell.twitch;
+  if (shell.twitch) {
+    $("whoName").textContent = shell.twitch;
+    $("whoMark").textContent = initials(shell.twitch);
+  }
+
+  $("stBar").classList.toggle("live", live.farming);
+  $("stFarm").textContent = live.note;
+  const traffic = $("stTraffic");
+  traffic.hidden = !shell.traffic;
+  traffic.querySelector("b").textContent = `${shell.traffic} КБ/мин`;
+  const deadline = $("stDeadline");
+  deadline.hidden = !shell.deadline;
+  // в статусной строке всё разделено точкой, запятой из локали тут не место
+  if (shell.deadline) {
+    deadline.querySelector("b").textContent = clock(shell.deadline).replace(", ", " · ");
+  }
+  $("stTelegram").hidden = !shell.telegram;
+  $("stVersion").textContent = "v" + shell.version;
+  /* Плашка об обновлении: сравнение версий делает служба, тут только показ.
+     Ссылка ведёт на страницу релиза: там инсталлер и что изменилось. */
+  const upd = $("stUpdate");
+  upd.hidden = !shell.update;
+  if (shell.update) {
+    upd.querySelector("b").textContent = shell.update;
+    upd.href = shell.update_url || "https://github.com/ksenobeat/twitch_drops_farmer_vahta/releases";
+    // Скачано — значит ставится само на ближайшей границе ломтя, и жать
+    // никуда не надо. Молчать об этом нельзя: человек нажмёт и удивится
+    $("stUpdWord").textContent = shell.update_ready ? "ставлю версию" : "вышла версия";
+    upd.title = shell.update_ready
+      ? "Уже скачана и проверена — встанет в ближайшую паузу в фарме"
+      : "Открыть релиз на GitHub";
+  }
+
+  applyTheme(shell.theme);
+}
+
+let planCache = null;
+let farmingNow = null;  // кампания, которая правда в эфире
+async function tick() {
+  /* Два запроса — две судьбы, и мешать их в один `try` нельзя. Когда-то
+     было наоборот: план шёл первым и в общем `catch`, и на чистой установке
+     его пятисотый (без входа в Twitch обход бросает `LoginRequired`) уносил
+     весь опрос. Человек получал пустой «Сейчас», надпись «нет связи
+     со службой» — и ни одного шага мастера, хотя служба работала. */
+  let live;
+  try {
+    live = await get("/api/now");
+  } catch (e) {
+    // а вот здесь надпись честная: не ответила сама служба
+    $("stBar").classList.remove("live");
+    $("stFarm").textContent = "нет связи со службой";
+    return;
+  }
+  // что фармится на самом деле: «Расписание» рисуется отдельно от «Сейчас»
+  // и своими глазами этого не видит
+  farmingNow = live.note === "в эфире" ? live.campaign : null;
+  renderShell(live, live.shell);
+  showEvents(live.events);
+  // Мастер здоровается один раз — дальше это записано в настройках. Зовётся
+  // до плана намеренно: план строится обходом Twitch, на пустой базе это
+  // минуты, и здороваться после него значит здороваться, когда человек уже
+  // сам разобрался.
+  if (!live.shell.onboarded && !wizDone) openWizard();
+
+  // План перечитываем не каждый опрос (он дорог: блоки на 14 дней вперёд),
+  // а когда служба построила новый — `plan_at` это и есть время сборки.
+  // Иначе кэш жил до первого действия человека, и «График» показывал
+  // доеденные кампании часами: служба уже ушла на следующую игру, а на
+  // экране прежний план с блоком в прошлом.
+  try {
+    if (!planCache || (live.plan_at && live.plan_at !== planCache.starts_at))
+      planCache = await get("/api/plan");
+  } catch (e) {
+    // плана нет — это не «нет связи»: шапка, лента и мастер уже на экране,
+    // а причину скажет надпись в «Сейчас». Следующий опрос попробует снова
+    return;
+  }
+  if (!planCache) return;
+  // «Сейчас» владеет шапкой и правой колонкой — рисуем его только когда он
+  // открыт, иначе опрос затирал бы чужому экрану кнопки
+  if ($("p-now").classList.contains("on")) renderNow(live, planCache);
+  renderPlan(planCache);
+}
+tick();
+setInterval(tick, 20000);
+setInterval(drawShift, 1000);  // часы смены — по своим часам, а не по опросу
+</script>
+</body>
+</html>

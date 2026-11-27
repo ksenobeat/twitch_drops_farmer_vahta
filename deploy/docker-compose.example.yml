@@ -1,0 +1,29 @@
+# Пример запуска «Вахты» на своём сервере. Подробности — deploy/README.md.
+# Образ собирается из корня репозитория: docker build -f deploy/Dockerfile -t vahta .
+services:
+  vahta:
+    image: vahta
+    restart: unless-stopped
+    environment:
+      VAHTA_PUBLIC_URL: https://vahta.example.com   # адрес, по которому открываете панель
+      VAHTA_PASSWORD_FILE: /run/secrets/web_password
+      VAHTA_TRUSTED_PROXY: 172.18.0.2               # IP вашего обратного прокси
+      TZ: Europe/Moscow
+    volumes:
+      - ./data:/data
+    secrets:
+      - web_password
+    # Порт наружу не публикуется: панель открывается через обратный прокси
+    # в той же Docker-сети. Для проверки без прокси можно временно добавить
+    # ports: ["127.0.0.1:8420:8420"]
+    expose:
+      - "8420"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8420/healthz', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+secrets:
+  web_password:
+    file: ./secrets/web_password
