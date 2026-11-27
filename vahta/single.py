@@ -33,11 +33,18 @@ def claim() -> bool:
     global _handle
     if sys.platform != "win32":
         return True
-    _handle = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX)
-    if not _handle:
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX)
+    if not handle:
         log.warning("Мьютекс не создался, проверку единственности пропускаю")
         return True
-    return ctypes.windll.kernel32.GetLastError() != ERROR_ALREADY_EXISTS
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        # Чужой мьютекс держать нельзя: пока открыта наша ссылка, он не
+        # освободится и после выхода хозяина. `--quit` из-за этого ждал
+        # собственную ссылку все 45 секунд и докладывал инсталлеру «не вышла»
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return False
+    _handle = handle
+    return True
 
 
 def _ask(url: str, path: str, timeout: float) -> bool:

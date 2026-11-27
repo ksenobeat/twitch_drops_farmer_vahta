@@ -36,6 +36,27 @@ check("первый запуск проходит", single.claim(), True)
 check("второй не проходит", single.claim(), False)
 check("и третий тоже", single.claim(), False)
 
+# --- неудачный claim не держит чужой мьютекс --------------------------------
+# Так работает `--quit`: проверяет, что «Вахта» запущена, просит её выйти и
+# ждёт, пока мьютекс освободится. Раньше проверка оставляла свою ссылку
+# открытой, и мьютекс не освобождался никогда — ждали все 45 секунд.
+if sys.platform == "win32":
+    import subprocess
+
+    single.MUTEX = "Vahta.Test.QuitWaits"
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import ctypes,sys,time;"
+         f"ctypes.windll.kernel32.CreateMutexW(None,False,{single.MUTEX!r});"
+         "print('ready',flush=True);sys.stdin.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    holder.stdout.readline()
+    check("чужой экземпляр виден", single.claim(), False)
+    holder.stdin.close()
+    holder.wait(10)
+    check("после его выхода мьютекс свободен", single.released(3.0), True)
+
 # --- занятость порта ---------------------------------------------------------
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as busy:
     busy.bind(("127.0.0.1", 0))
